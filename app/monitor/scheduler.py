@@ -2,8 +2,12 @@ import asyncio
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
+from sqlalchemy.orm import Session
 
 from app.monitor.tasks import MonitorTask, TaskStatus, get_task_registry
+from app.database import get_db
+from app.crud import account
+from app.models.account import Account
 from bot.browser import BrowserManager
 from bot.pages.bigmodel import BigModelPage, create_bigmodel_page
 from bot.pages.bigmodel import StockStatus
@@ -132,17 +136,86 @@ class MonitorScheduler:
         try:
             logger.info(f"Attempting purchase for task: {task.name}")
 
-            # This would need to be implemented with actual purchase logic
-            # using account credentials from database
+            # Get account from database
+            if not task.account_id:
+                return {
+                    "success": False,
+                    "message": "No account configured for purchase",
+                    "attempted_at": datetime.now().isoformat(),
+                }
 
+            db: Session = next(get_db())
+            db_account = account.get(db, id=task.account_id)
+
+            if not db_account:
+                return {
+                    "success": False,
+                    "message": f"Account {task.account_id} not found",
+                    "attempted_at": datetime.now().isoformat(),
+                }
+
+            if db_account.status != "active":
+                return {
+                    "success": False,
+                    "message": f"Account {db_account.username} is not active",
+                    "attempted_at": datetime.now().isoformat(),
+                }
+
+            # Execute purchase flow
+            result = await self._execute_purchase_flow(task, db_account)
+
+            # Update account last used time
+            db_account.last_used_at = datetime.now()
+            db.commit()
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in purchase attempt: {e}")
             return {
                 "success": False,
-                "message": "Purchase feature not fully implemented",
+                "error": str(e),
+                "attempted_at": datetime.now().isoformat(),
+            }
+
+    async def _execute_purchase_flow(self, task: MonitorTask, db_account: Account) -> Dict[str, Any]:
+        """Execute the actual purchase flow"""
+        try:
+            # Create browser context and page
+            if not self.browser_manager:
+                from bot.browser import get_browser_manager
+                self.browser_manager = get_browser_manager()
+
+            context = await self.browser_manager.create_context()
+            page = await create_bigmodel_page(context)
+
+            # Navigate to home
+            await page.go_to_home()
+
+            # Login if needed
+            login_success = await page.login(db_account.username, db_account.password)
+            if not login_success:
+                await context.close()
+                return {
+                    "success": False,
+                    "message": "Login failed",
+                    "attempted_at": datetime.now().isoformat(),
+                }
+
+            # Navigate to product page and purchase
+            purchase_success, order_id = await page.purchase()
+
+            await context.close()
+
+            return {
+                "success": purchase_success,
+                "order_id": order_id,
+                "message": "Purchase successful" if purchase_success else "Purchase failed",
                 "attempted_at": datetime.now().isoformat(),
             }
 
         except Exception as e:
-            logger.error(f"Error in purchase attempt: {e}")
+            logger.error(f"Error in purchase flow: {e}")
             return {
                 "success": False,
                 "error": str(e),
