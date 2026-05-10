@@ -62,3 +62,37 @@ async def test_attempt_purchase_with_account():
 
             assert result["success"] is True
             assert "order_id" in result
+
+
+@pytest.mark.asyncio
+async def test_purchase_sends_notification():
+    """Test that purchase attempt sends notification"""
+    scheduler = MonitorScheduler()
+
+    task = MonitorTask(
+        task_id="test-1",
+        name="Test Task",
+        target_url="https://example.com",
+        check_interval=30,
+        auto_purchase=True,
+        account_id=1,
+    )
+
+    with patch('app.monitor.scheduler.get_db') as mock_get_db:
+        mock_db = Mock()
+        mock_account = Account(id=1, username="testuser", password="testpass", status="active", is_public=True)
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_account
+        mock_get_db.return_value.__enter__.return_value = mock_db
+
+        with patch.object(scheduler, '_execute_purchase_flow', new_callable=AsyncMock) as mock_execute:
+            mock_execute.return_value = {"success": True, "order_id": "12345"}
+
+            with patch('app.monitor.scheduler.get_notification_service') as mock_notification:
+                mock_service = Mock()
+                mock_service.send = AsyncMock()
+                mock_notification.return_value = mock_service
+
+                await scheduler._attempt_purchase(task)
+
+                # Verify notification was sent
+                mock_service.send.assert_called_once()

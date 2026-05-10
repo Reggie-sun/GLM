@@ -11,6 +11,7 @@ from app.models.account import Account
 from bot.browser import BrowserManager
 from bot.pages.bigmodel import BigModelPage, create_bigmodel_page
 from bot.pages.bigmodel import StockStatus
+from app.notifications import get_notification_service, Notification, NotificationLevel
 
 logger = logging.getLogger(__name__)
 
@@ -138,45 +139,79 @@ class MonitorScheduler:
 
             # Get account from database
             if not task.account_id:
-                return {
+                result = {
                     "success": False,
                     "message": "No account configured for purchase",
                     "attempted_at": datetime.now().isoformat(),
                 }
+            else:
+                db: Session = next(get_db())
+                db_account = account.get(db, id=task.account_id)
 
-            db: Session = next(get_db())
-            db_account = account.get(db, id=task.account_id)
+                if not db_account:
+                    result = {
+                        "success": False,
+                        "message": f"Account {task.account_id} not found",
+                        "attempted_at": datetime.now().isoformat(),
+                    }
+                elif db_account.status != "active":
+                    result = {
+                        "success": False,
+                        "message": f"Account {db_account.username} is not active",
+                        "attempted_at": datetime.now().isoformat(),
+                    }
+                else:
+                    # Execute purchase flow
+                    result = await self._execute_purchase_flow(task, db_account)
 
-            if not db_account:
-                return {
-                    "success": False,
-                    "message": f"Account {task.account_id} not found",
-                    "attempted_at": datetime.now().isoformat(),
-                }
+                    # Update account last used time
+                    db_account.last_used_at = datetime.now()
+                    db.commit()
 
-            if db_account.status != "active":
-                return {
-                    "success": False,
-                    "message": f"Account {db_account.username} is not active",
-                    "attempted_at": datetime.now().isoformat(),
-                }
+            # Send notification
+            try:
+                notification_service = get_notification_service()
 
-            # Execute purchase flow
-            result = await self._execute_purchase_flow(task, db_account)
+                if result.get("success"):
+                    notification = Notification(
+                        title="Purchase Successful!",
+                        message=f"Successfully purchased for task: {task.name}. Order ID: {result.get('order_id')}",
+                        level=NotificationLevel.SUCCESS,
+                    )
+                else:
+                    notification = Notification(
+                        title="Purchase Failed",
+                        message=f"Purchase attempt failed for task: {task.name}. Error: {result.get('message', result.get('error', 'Unknown error'))}",
+                        level=NotificationLevel.ERROR,
+                    )
 
-            # Update account last used time
-            db_account.last_used_at = datetime.now()
-            db.commit()
+                await notification_service.send(notification)
+            except Exception as e:
+                logger.error(f"Failed to send notification: {e}")
 
             return result
 
         except Exception as e:
             logger.error(f"Error in purchase attempt: {e}")
-            return {
+            result = {
                 "success": False,
                 "error": str(e),
                 "attempted_at": datetime.now().isoformat(),
             }
+
+            # Send notification for unexpected exception
+            try:
+                notification_service = get_notification_service()
+                notification = Notification(
+                    title="Purchase Failed",
+                    message=f"Purchase attempt failed for task: {task.name}. Error: {str(e)}",
+                    level=NotificationLevel.ERROR,
+                )
+                await notification_service.send(notification)
+            except Exception as e:
+                logger.error(f"Failed to send notification: {e}")
+
+            return result
 
     async def _execute_purchase_flow(self, task: MonitorTask, db_account: Account) -> Dict[str, Any]:
         """Execute the actual purchase flow"""
