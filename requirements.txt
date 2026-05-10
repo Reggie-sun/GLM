@@ -14,7 +14,9 @@ redis>=5.0.0
 celery>=5.3.0
 
 # Browser Automation
-playwright>=1.40.0
+# Keep this pinned to the Docker base image version so Playwright can find
+# the preinstalled browser binaries without reinstalling them.
+playwright==1.59.0
 
 # Utilities
 pydantic>=2.0.0

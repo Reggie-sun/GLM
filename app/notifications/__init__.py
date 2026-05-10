@@ -1,3 +1,5 @@
+from typing import Dict, Optional
+
 from app.notifications.base import (
     Notification,
     NotificationLevel,
