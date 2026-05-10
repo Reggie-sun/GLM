@@ -7,7 +7,7 @@ from app.monitor.tasks import MonitorTask, TaskStatus, get_task_registry
 from app.notifications import get_notification_service, Notification, NotificationLevel
 from bot.pages.bigmodel import StockStatus
 
-router = APIRouter(prefix="/monitor", tags=["monitor"])
+router = APIRouter(tags=["monitor"])
 
 
 # Request schemas

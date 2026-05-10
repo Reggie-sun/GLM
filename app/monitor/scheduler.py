@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import json
 from typing import Dict, Any, Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -101,7 +102,7 @@ class MonitorScheduler:
             await asyncio.sleep(task.check_interval)
 
     async def _check_stock_once(self, task: MonitorTask) -> Dict[str, Any]:
-        """Check stock once"""
+        """Check stock once - navigates to GLM Coding page"""
         try:
             # Create browser context and page
             if not self.browser_manager:
@@ -111,18 +112,26 @@ class MonitorScheduler:
             context = await self.browser_manager.create_context()
             page = await create_bigmodel_page(context)
 
-            # Navigate and check
-            await page.go_to_home()
+            # Navigate to GLM Coding product page and check
+            await page.go_to_glm_coding()
             status, product_info = await page.check_stock()
 
             await context.close()
 
-            return {
+            result = {
                 "status": status,
                 "product": product_info.name,
                 "price": product_info.price,
+                "restock_time": product_info.restock_time,
                 "checked_at": datetime.now().isoformat(),
             }
+
+            # Log what we found
+            logger.info(f"Check result: {status}")
+            if product_info.restock_time:
+                logger.info(f"Restock time: {product_info.restock_time}")
+
+            return result
 
         except Exception as e:
             logger.error(f"Error checking stock: {e}")
@@ -214,7 +223,7 @@ class MonitorScheduler:
             return result
 
     async def _execute_purchase_flow(self, task: MonitorTask, db_account: Account) -> Dict[str, Any]:
-        """Execute the actual purchase flow"""
+        """Execute the actual purchase flow with cookies"""
         try:
             # Create browser context and page
             if not self.browser_manager:
@@ -224,20 +233,34 @@ class MonitorScheduler:
             context = await self.browser_manager.create_context()
             page = await create_bigmodel_page(context)
 
-            # Navigate to home
-            await page.go_to_home()
+            # Login with cookies FIRST (preferred method)
+            login_success = False
+            if db_account.cookie:
+                try:
+                    cookies = json.loads(db_account.cookie)
+                    login_success = await page.login_with_cookies(cookies)
+                    logger.info("Cookie login attempted")
+                except Exception as e:
+                    logger.warning(f"Cookie login failed: {e}")
 
-            # Login if needed
-            login_success = await page.login(db_account.username, db_account.password)
+            # If cookie login didn't work, fall back to username/password
+            if not login_success and db_account.password:
+                logger.info("Falling back to username/password login")
+                login_success = await page.login(db_account.username, db_account.password)
+
             if not login_success:
                 await context.close()
                 return {
                     "success": False,
-                    "message": "Login failed",
+                    "message": "Login failed with both cookies and password",
                     "attempted_at": datetime.now().isoformat(),
                 }
 
-            # Navigate to product page and purchase
+            # Navigate to GLM Coding product page
+            await page.go_to_glm_coding()
+            await asyncio.sleep(2)
+
+            # Attempt purchase
             purchase_success, order_id = await page.purchase()
 
             await context.close()
@@ -251,6 +274,8 @@ class MonitorScheduler:
 
         except Exception as e:
             logger.error(f"Error in purchase flow: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e),
