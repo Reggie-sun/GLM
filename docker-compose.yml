@@ -42,6 +42,19 @@ services:
       - "6379:6379"
     restart: always
 
+  worker:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql://glm_user:glm_pass@postgres:5432/glm_bot
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - postgres
+      - redis
+    restart: always
+    command: celery -A app.celery_app worker --loglevel=INFO --concurrency=2
+
 volumes:
   postgres_data:
   redis_data:
