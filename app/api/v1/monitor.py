@@ -16,6 +16,7 @@ class CreateMonitorTaskRequest(BaseModel):
     target_url: str = Field(..., description="URL to monitor")
     check_interval: int = Field(30, description="Check interval in seconds", ge=5)
     auto_purchase: bool = Field(False, description="Whether to auto-purchase when in stock")
+    account_id: Optional[int] = Field(None, description="Account ID to use for purchase")
     webhook_url: Optional[str] = Field(None, description="Webhook URL for notifications")
 
 
@@ -33,6 +34,7 @@ class MonitorTaskResponse(BaseModel):
     status: str
     check_interval: int
     auto_purchase: bool
+    account_id: Optional[int] = None
     created_at: str
     last_run_at: Optional[str] = None
     last_result: Optional[Dict[str, Any]] = None
@@ -53,6 +55,7 @@ def _task_to_response(task: MonitorTask) -> MonitorTaskResponse:
         status=task.status.value,
         check_interval=task.check_interval,
         auto_purchase=task.auto_purchase,
+        account_id=task.account_id,
         created_at=task.created_at.isoformat(),
         last_run_at=task.last_run_at.isoformat() if task.last_run_at else None,
         last_result=task.last_result,
@@ -89,6 +92,7 @@ async def create_monitor_task(request: CreateMonitorTaskRequest):
         target_url=request.target_url,
         check_interval=request.check_interval,
         auto_purchase=request.auto_purchase,
+        account_id=request.account_id,
     )
 
     task_id = await scheduler.start_monitor(task)
