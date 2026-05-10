@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 from bot.config import BrowserConfig, get_browser_config
+from bot.proxy import ProxyConfig
 
 
 class BrowserManager:
@@ -30,6 +31,7 @@ class BrowserManager:
         self,
         user_agent: Optional[str] = None,
         proxy: Optional[Dict[str, Any]] = None,
+        proxy_config: Optional[ProxyConfig] = None,
         storage_state: Optional[str] = None,
     ) -> BrowserContext:
         """Create a new browser context"""
@@ -50,6 +52,8 @@ class BrowserManager:
 
         if proxy:
             context_options["proxy"] = proxy
+        elif proxy_config:
+            context_options["proxy"] = proxy_config.to_playwright_dict()
 
         if storage_state:
             context_options["storage_state"] = storage_state
