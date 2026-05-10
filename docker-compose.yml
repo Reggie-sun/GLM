@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://glm_user:glm_pass@postgres:5432/glm_bot
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+      - .:/app
+    depends_on:
+      - postgres
+      - redis
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=glm_user
+      - POSTGRES_PASSWORD=glm_pass
+      - POSTGRES_DB=glm_bot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: always
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: always
+
+volumes:
+  postgres_data:
+  redis_data:
