@@ -141,6 +141,38 @@ curl -X POST http://localhost:8000/api/v1/monitor/tasks/{task_id}/stop
 curl -X POST http://localhost:8000/api/v1/monitor/tasks/{task_id}/check
 ```
 
+## Auto-Purchase Feature
+
+### Setup
+
+1. **Add Accounts to Database**
+   - Use the `/api/v1/accounts` endpoints to add bigmodel.cn accounts
+   - Set accounts as "active" and optionally "public" for shared use
+
+2. **Create a Monitor Task with Auto-Purchase**
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/monitor/tasks \
+     -H "Content-Type: application/json" \
+     -d '{
+       "name": "GLM Coding Auto-Buy",
+       "target_url": "https://bigmodel.cn/glm-coding",
+       "check_interval": 30,
+       "auto_purchase": true,
+       "account_id": 1
+     }'
+   ```
+
+3. **Verify the Setup**
+   ```bash
+   python scripts/verify_purchase_setup.py
+   ```
+
+### Important Notes
+
+- **Selectors Need Configuration**: The default selectors in `bot/pages/bigmodel.py` are placeholders. You must analyze the actual bigmodel.cn page and update them.
+- **Use Responsibly**: Set reasonable check intervals and respect the target website's terms of service.
+- **Test First**: Try with a test account before using real purchase functionality.
+
 ## 配置说明
 
 ### 环境变量
