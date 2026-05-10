@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 from app.config import get_settings
+from app.api import api_router
 
 settings = get_settings()
 
@@ -10,6 +11,8 @@ app = FastAPI(
 )
 
 templates = Jinja2Templates(directory="app/templates")
+
+app.include_router(api_router, prefix="/api/v1")
 
 
 @app.get("/")
