@@ -29,6 +29,7 @@ class MonitorTask:
     last_result: Optional[Dict[str, Any]] = None
     error_message: Optional[str] = None
     auto_purchase: bool = False
+    account_id: Optional[int] = None  # New field
     on_stock_change: Optional[Callable] = None
 
     def __post_init__(self):

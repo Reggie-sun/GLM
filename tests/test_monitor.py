@@ -183,3 +183,18 @@ def test_monitor_task_with_data():
     assert task.auto_purchase is True
     assert task.last_result == {"test": "data"}
     assert task.error_message is None
+
+
+def test_monitor_task_with_account():
+    """Test monitor task with account configuration"""
+    task = MonitorTask(
+        task_id="",
+        name="Account Test",
+        target_url="https://example.com",
+        check_interval=30,
+        auto_purchase=True,
+        account_id=1,
+    )
+
+    assert task.account_id == 1
+    assert task.auto_purchase is True
