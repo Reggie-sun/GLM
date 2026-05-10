@@ -132,5 +132,52 @@ def test_page_navigator_import():
     assert PageNavigator is not None
 
 
+@pytest.mark.asyncio
+async def test_bigmodel_page_login():
+    """Test BigModelPage login method structure"""
+    from bot.pages.bigmodel import BigModelPage
+    from unittest.mock import AsyncMock, Mock
+
+    # Create mock page and navigator
+    mock_page = Mock()
+    mock_navigator = Mock()
+    mock_navigator.fill = AsyncMock()
+    mock_navigator.click = AsyncMock()
+    mock_navigator.wait_for_load_state = AsyncMock()
+    mock_navigator.is_visible = AsyncMock(return_value=True)
+
+    page = BigModelPage(mock_page, mock_navigator)
+
+    # Just test the method signature and basic structure
+    result = await page.login("testuser", "testpass")
+
+    # Result should be boolean
+    assert isinstance(result, bool)
+
+
+@pytest.mark.asyncio
+async def test_bigmodel_page_purchase():
+    """Test BigModelPage purchase method structure"""
+    from bot.pages.bigmodel import BigModelPage
+    from unittest.mock import AsyncMock, Mock
+
+    # Create mock page and navigator
+    mock_page = Mock()
+    mock_navigator = Mock()
+    mock_navigator.click = AsyncMock()
+    mock_navigator.wait_for_load_state = AsyncMock()
+    mock_navigator.is_visible = AsyncMock(return_value=True)
+    mock_navigator.get_text = AsyncMock(return_value="ORDER-123")
+
+    page = BigModelPage(mock_page, mock_navigator)
+
+    # Just test the method signature and basic structure
+    success, order_id = await page.purchase()
+
+    # Result should be tuple of (bool, Optional[str])
+    assert isinstance(success, bool)
+    assert order_id is None or isinstance(order_id, str)
+
+
 # Note: Full browser tests are not run by default as they require Playwright browsers
 # These are just import and basic functionality tests

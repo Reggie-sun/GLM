@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from typing import Optional, Dict, Any, Tuple
 from enum import Enum
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from playwright.async_api import Page, BrowserContext, TimeoutError
 from bot.navigator import PageNavigator, create_navigator
 from bot.session import Session
 from bot.fingerprint import Fingerprint
+
+logger = logging.getLogger(__name__)
 
 
 class StockStatus(Enum):
@@ -72,9 +75,16 @@ class BigModelPage:
             )
 
     async def login(self, username: str, password: str) -> bool:
-        """Perform login"""
+        """Perform login
+
+        NOTE: Selectors need to be updated based on actual bigmodel.cn page structure
+        Current selectors are placeholders only.
+
+        Returns:
+            bool: True if login successful, False otherwise
+        """
         try:
-            # This is a template - actual selectors need to be adjusted based on real page
+            # PLACEHOLDER SELECTORS - UPDATE BASED ON REAL PAGE
             await self.navigator.fill("#username", username)
             await self.navigator.fill("#password", password)
             await self.navigator.click("#login-button")
@@ -83,13 +93,23 @@ class BigModelPage:
             # Check if login successful
             return await self.navigator.is_visible(".user-profile")
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"Login error: {e}")
             return False
 
     async def purchase(self, timeout: int = 30000) -> Tuple[bool, Optional[str]]:
-        """Attempt to purchase"""
+        """Attempt to purchase
+
+        NOTE: Selectors need to be updated based on actual bigmodel.cn page structure
+        Current selectors are placeholders only.
+
+        Returns:
+            Tuple[bool, Optional[str]]: (success, order_id)
+        """
         try:
-            # Click buy button - selectors need to be adjusted
+            # PLACEHOLDER SELECTORS - UPDATE BASED ON REAL PAGE
+
+            # Click buy button
             await self.navigator.click(".buy-button", timeout=timeout)
             await self.navigator.wait_for_load_state("networkidle")
 
@@ -104,7 +124,8 @@ class BigModelPage:
             return success, order_id
 
         except Exception as e:
-            return False, str(e)
+            logger.error(f"Purchase error: {e}")
+            return False, None
 
     async def save_screenshot(self, path: Optional[str] = None) -> bytes:
         """Take a screenshot"""
