@@ -5,7 +5,7 @@ import asyncio
 from app.monitor.scheduler import MonitorScheduler
 from app.monitor.tasks import MonitorTask, TaskStatus
 from app.models.account import Account
-from bot.pages.bigmodel import StockStatus
+from bot.pages.bigmodel import StockStatus, ProductInfo
 
 
 @pytest.mark.asyncio
@@ -146,3 +146,58 @@ async def test_initial_in_stock_triggers_auto_purchase():
 
     scheduler._attempt_purchase.assert_awaited_once()
     await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_check_stock_once_uses_account_cookie_for_account_specific_status():
+    """Stock checks should use the task account's cookies when an account is configured."""
+    scheduler = MonitorScheduler()
+
+    task = MonitorTask(
+        task_id="account-aware-stock",
+        name="Account Aware Stock",
+        target_url="https://example.com",
+        check_interval=30,
+        auto_purchase=False,
+        account_id=1,
+    )
+
+    mock_context = Mock()
+    mock_context.close = AsyncMock()
+
+    mock_browser_manager = Mock()
+    mock_browser_manager.create_context = AsyncMock(return_value=mock_context)
+    scheduler.browser_manager = mock_browser_manager
+
+    mock_page = Mock()
+    mock_page.go_to_home = AsyncMock()
+    mock_page.go_to_glm_coding = AsyncMock()
+    mock_page.login_with_cookies = AsyncMock(return_value=True)
+    mock_page.login = AsyncMock(return_value=False)
+    mock_page.check_stock = AsyncMock(
+        return_value=(
+            StockStatus.OUT_OF_STOCK,
+            ProductInfo(name="GLM Coding", status=StockStatus.OUT_OF_STOCK),
+        )
+    )
+
+    with patch('app.monitor.scheduler.get_db') as mock_get_db:
+        mock_db = Mock()
+        mock_account = Account(
+            id=1,
+            username="whdgfr07",
+            password="cookie_only",
+            status="active",
+            is_public=False,
+            cookie='[{"name":"session","value":"abc","domain":"bigmodel.cn","path":"/"}]',
+        )
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_account
+        mock_get_db.return_value = iter([mock_db])
+
+        with patch('app.monitor.scheduler.create_bigmodel_page', new=AsyncMock(return_value=mock_page)):
+            result = await scheduler._check_stock_once(task)
+
+    assert result["status"] == StockStatus.OUT_OF_STOCK
+    mock_page.go_to_home.assert_awaited_once()
+    mock_page.login_with_cookies.assert_awaited_once()
+    mock_page.check_stock.assert_awaited_once()

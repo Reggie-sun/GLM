@@ -113,11 +113,27 @@ class MonitorScheduler:
 
     async def _check_stock_once(self, task: MonitorTask) -> Dict[str, Any]:
         """Check stock once - navigates to GLM Coding page"""
+        db_generator = None
         try:
             # Create browser context and page
             browser_manager = await self._get_or_create_browser_manager()
             context = await browser_manager.create_context()
             page = await create_bigmodel_page(context)
+
+            if task.account_id:
+                db_generator = get_db()
+                db: Session = next(db_generator)
+                db_account = account.get(db, id=task.account_id)
+
+                if db_account and db_account.status == "active":
+                    login_success = await self._login_page_with_account(page, db_account)
+                    if not login_success:
+                        await context.close()
+                        return {
+                            "status": StockStatus.UNKNOWN,
+                            "error": f"Account {db_account.username} login failed during stock check",
+                            "checked_at": datetime.now().isoformat(),
+                        }
 
             # Navigate to GLM Coding product page and check
             await page.go_to_glm_coding()
@@ -147,6 +163,9 @@ class MonitorScheduler:
                 "error": str(e),
                 "checked_at": datetime.now().isoformat(),
             }
+        finally:
+            if db_generator is not None and hasattr(db_generator, "close"):
+                db_generator.close()
 
     async def _attempt_purchase(self, task: MonitorTask) -> Dict[str, Any]:
         """Attempt purchase"""
@@ -242,20 +261,7 @@ class MonitorScheduler:
             context = await browser_manager.create_context()
             page = await create_bigmodel_page(context)
 
-            # Login with cookies FIRST (preferred method)
-            login_success = False
-            if db_account.cookie:
-                try:
-                    cookies = json.loads(db_account.cookie)
-                    login_success = await page.login_with_cookies(cookies)
-                    logger.info("Cookie login attempted")
-                except Exception as e:
-                    logger.warning(f"Cookie login failed: {e}")
-
-            # If cookie login didn't work, fall back to username/password
-            if not login_success and db_account.password:
-                logger.info("Falling back to username/password login")
-                login_success = await page.login(db_account.username, db_account.password)
+            login_success = await self._login_page_with_account(page, db_account)
 
             if not login_success:
                 await context.close()
@@ -296,6 +302,26 @@ class MonitorScheduler:
         if not self.browser_manager:
             self.browser_manager = BrowserManager()
         return self.browser_manager
+
+    async def _login_page_with_account(self, page: BigModelPage, db_account: Account) -> bool:
+        """Authenticate a page with the account's cookies first, then password."""
+        login_success = False
+
+        if db_account.cookie:
+            try:
+                await page.go_to_home()
+                await asyncio.sleep(1)
+                cookies = json.loads(db_account.cookie)
+                login_success = await page.login_with_cookies(cookies)
+                logger.info("Cookie login attempted")
+            except Exception as e:
+                logger.warning(f"Cookie login failed: {e}")
+
+        if not login_success and db_account.password:
+            logger.info("Falling back to username/password login")
+            login_success = await page.login(db_account.username, db_account.password)
+
+        return login_success
 
     def get_task(self, task_id: str) -> Optional[MonitorTask]:
         """Get a task by ID"""
