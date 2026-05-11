@@ -34,9 +34,26 @@ class ProductInfo:
 
 class BigModelPage:
     BASE_URL = "https://bigmodel.cn"
-    BUY_KEYWORDS = ("购买", "立即购买", "立即开通", "立即抢购", "预约", "订阅", "去购买")
-    BUY_BLOCKLIST = ("帮助", "客服", "详情", "登录", "注册", "取消", "关闭")
+    BUY_KEYWORDS = (
+        "购买",
+        "立即购买",
+        "立即开通",
+        "立即抢购",
+        "预约",
+        "订阅",
+        "即刻订阅",
+        "特惠订阅",
+        "订阅套餐",
+        "去购买",
+    )
+    BUY_BLOCKLIST = ("帮助", "客服", "详情", "登录", "注册", "取消", "关闭", "暂不订阅")
     CONFIRM_KEYWORDS = ("确认购买", "立即支付", "去支付", "确认", "继续")
+    BUY_BUTTON_SELECTORS = (
+        "button.buy-btn",
+        "button[name='特惠订阅']",
+        ".package-card-btn-box button",
+        ".subscribe-container button",
+    )
     AUTHENTICATED_SELECTORS = (
         "[class*='avatar']",
         "[data-testid*='avatar']",
@@ -86,8 +103,14 @@ class BigModelPage:
                 last_updated=datetime.now()
             )
 
+            buy_buttons = await self._find_purchase_buttons()
+
+            if buy_buttons:
+                product_info.status = StockStatus.IN_STOCK
+                logger.info("Found actionable subscribe button - In stock")
+
             # Check for out of stock text
-            if '暂时售罄' in body_text:
+            elif '暂时售罄' in body_text:
                 product_info.status = StockStatus.OUT_OF_STOCK
                 logger.info("Found '暂时售罄' - Out of stock")
 
@@ -249,23 +272,8 @@ class BigModelPage:
         try:
             await asyncio.sleep(2)
 
-            buy_button = None
-
-            elements = await self.page.query_selector_all(
-                'button, [role="button"], a, [class*="btn"], [class*="button"]'
-            )
-            for elem in elements:
-                try:
-                    text = (await elem.inner_text()).strip()
-                    if not self._looks_like_purchase_action(text):
-                        continue
-                    if not await self._element_is_enabled(elem):
-                        continue
-                    buy_button = elem
-                    logger.info(f"Found buy button with text: {text}")
-                    break
-                except Exception:
-                    continue
+            buy_buttons = await self._find_purchase_buttons()
+            buy_button = buy_buttons[0] if buy_buttons else None
 
             if buy_button:
                 logger.info("Clicking buy button...")
@@ -335,6 +343,59 @@ class BigModelPage:
 
         return False
 
+    async def _find_purchase_buttons(self) -> list:
+        """Find visible and enabled purchase buttons using live-page selectors first."""
+        found = []
+        seen = set()
+
+        for selector in self.BUY_BUTTON_SELECTORS:
+            try:
+                elements = await self.page.query_selector_all(selector)
+            except Exception:
+                continue
+
+            for element in elements:
+                if id(element) in seen:
+                    continue
+                if not await self._element_is_actionable_purchase(element):
+                    continue
+                found.append(element)
+                seen.add(id(element))
+
+        try:
+            generic_elements = await self.page.query_selector_all(
+                'button, [role="button"], a, [class*="btn"], [class*="button"]'
+            )
+        except Exception:
+            generic_elements = []
+
+        for element in generic_elements:
+            if id(element) in seen:
+                continue
+            if not await self._element_is_actionable_purchase(element):
+                continue
+            found.append(element)
+            seen.add(id(element))
+
+        return found
+
+    async def _element_is_actionable_purchase(self, element) -> bool:
+        """Whether this element looks like a real purchase CTA on the live page."""
+        try:
+            text = (await element.inner_text()).strip()
+        except Exception:
+            return False
+
+        if not self._looks_like_purchase_action(text):
+            return False
+        if not await self._element_is_enabled(element):
+            return False
+        if not await self._element_is_visible(element):
+            return False
+
+        logger.info(f"Found buy button with text: {text}")
+        return True
+
     async def _element_is_enabled(self, element) -> bool:
         """Return whether an element appears clickable."""
         try:
@@ -351,6 +412,25 @@ class BigModelPage:
         if 'disabled' in classes.lower():
             return False
         return True
+
+    async def _element_is_visible(self, element) -> bool:
+        """Best-effort visibility check so hidden modal actions do not win."""
+        try:
+            if hasattr(element, "bounding_box"):
+                box = await element.bounding_box()
+                if box:
+                    return True
+        except Exception:
+            pass
+
+        try:
+            style = await element.get_attribute("style") or ""
+            if "display: none" in style.lower() or "visibility: hidden" in style.lower():
+                return False
+        except Exception:
+            pass
+
+        return not hasattr(element, "bounding_box")
 
     def _looks_like_purchase_action(self, text: str) -> bool:
         """Keep button matching conservative to avoid accidental clicks."""

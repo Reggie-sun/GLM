@@ -7,6 +7,7 @@ from bot.fingerprint import Fingerprint, FingerprintManager
 from bot.session import Session, SessionManager
 from bot.proxy import ProxyConfig, ProxyManager
 from bot.navigator import PageNavigator
+from bot.pages.bigmodel import StockStatus
 
 
 def test_browser_config():
@@ -217,6 +218,67 @@ async def test_purchase_does_not_click_non_purchase_button():
     assert success is False
     assert order_id is None
     help_button.click.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_purchase_prefers_real_buy_button_over_modal_actions():
+    """Real package purchase buttons should win over hidden modal actions."""
+    from bot.pages.bigmodel import BigModelPage
+
+    continue_button = Mock()
+    continue_button.inner_text = AsyncMock(return_value="继续订阅")
+    continue_button.get_attribute = AsyncMock(side_effect=lambda name: "" if name != "class" else "el-button")
+    continue_button.bounding_box = AsyncMock(return_value=None)
+    continue_button.click = AsyncMock()
+
+    buy_button = Mock()
+    buy_button.inner_text = AsyncMock(return_value="特惠订阅")
+    buy_button.get_attribute = AsyncMock(side_effect=lambda name: "el-button buy-btn" if name == "class" else None)
+    buy_button.bounding_box = AsyncMock(return_value={"x": 10, "y": 10, "width": 120, "height": 40})
+    buy_button.click = AsyncMock()
+
+    mock_page = Mock()
+
+    async def query_selector_all(selector):
+        if selector == "button.buy-btn":
+            return [buy_button]
+        if selector == 'button, [role="button"], a, [class*="btn"], [class*="button"]':
+            return [continue_button, buy_button]
+        if selector == "button":
+            return [continue_button]
+        return []
+
+    mock_page.query_selector_all = AsyncMock(side_effect=query_selector_all)
+    mock_page.inner_text = AsyncMock(return_value="订单 创建成功")
+
+    page = BigModelPage(mock_page, Mock())
+    success, order_id = await page.purchase()
+
+    assert success is True
+    assert order_id is None or isinstance(order_id, str)
+    buy_button.click.assert_called_once()
+    continue_button.click.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_stock_detects_real_subscribe_button():
+    """Visible subscribe buttons on the live page should count as in stock."""
+    from bot.pages.bigmodel import BigModelPage
+
+    buy_button = Mock()
+    buy_button.inner_text = AsyncMock(return_value="特惠订阅")
+    buy_button.get_attribute = AsyncMock(side_effect=lambda name: "el-button buy-btn" if name == "class" else None)
+    buy_button.bounding_box = AsyncMock(return_value={"x": 10, "y": 10, "width": 120, "height": 40})
+
+    mock_page = Mock()
+    mock_page.inner_text = AsyncMock(return_value="GLM Coding Plan\n特惠订阅\n¥134.1/月")
+    mock_page.query_selector_all = AsyncMock(side_effect=[[buy_button]])
+
+    page = BigModelPage(mock_page, Mock())
+    status, product = await page.check_stock()
+
+    assert status == StockStatus.IN_STOCK
+    assert product.status == StockStatus.IN_STOCK
 
 
 # Note: Full browser tests are not run by default as they require Playwright browsers
