@@ -1,10 +1,11 @@
 import pytest
 from unittest.mock import Mock, AsyncMock, patch
-from datetime import datetime
+import asyncio
 
 from app.monitor.scheduler import MonitorScheduler
 from app.monitor.tasks import MonitorTask, TaskStatus
 from app.models.account import Account
+from bot.pages.bigmodel import StockStatus
 
 
 @pytest.mark.asyncio
@@ -82,7 +83,7 @@ async def test_purchase_sends_notification():
         mock_db = Mock()
         mock_account = Account(id=1, username="testuser", password="testpass", status="active", is_public=True)
         mock_db.query.return_value.filter.return_value.first.return_value = mock_account
-        mock_get_db.return_value.__enter__.return_value = mock_db
+        mock_get_db.return_value = iter([mock_db])
 
         with patch.object(scheduler, '_execute_purchase_flow', new_callable=AsyncMock) as mock_execute:
             mock_execute.return_value = {"success": True, "order_id": "12345"}
@@ -96,3 +97,52 @@ async def test_purchase_sends_notification():
 
                 # Verify notification was sent
                 mock_service.send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_monitor_task_waits_for_scheduler_start():
+    """Tasks created before scheduler start should remain pending in the loop."""
+    scheduler = MonitorScheduler()
+    task = MonitorTask(
+        task_id="wait-start",
+        name="Wait Start",
+        target_url="https://example.com",
+        check_interval=30,
+        auto_purchase=False,
+    )
+
+    task_id = await scheduler.start_monitor(task)
+    await asyncio.sleep(0.05)
+
+    assert task_id in scheduler._tasks
+    assert scheduler._tasks[task_id].done() is False
+
+    await scheduler.stop_monitor(task_id)
+
+
+@pytest.mark.asyncio
+async def test_initial_in_stock_triggers_auto_purchase():
+    """The first in-stock observation should trigger one purchase attempt."""
+    scheduler = MonitorScheduler()
+    task = MonitorTask(
+        task_id="initial-stock",
+        name="Initial Stock",
+        target_url="https://example.com",
+        check_interval=30,
+        auto_purchase=True,
+        account_id=1,
+    )
+
+    async def fake_attempt(_: MonitorTask):
+        task.status = TaskStatus.STOPPED
+        return {"success": True, "order_id": "12345"}
+
+    scheduler._check_stock_once = AsyncMock(return_value={"status": StockStatus.IN_STOCK})
+    scheduler._attempt_purchase = AsyncMock(side_effect=fake_attempt)
+
+    await scheduler.start()
+    await scheduler.start_monitor(task)
+    await asyncio.sleep(0.05)
+
+    scheduler._attempt_purchase.assert_awaited_once()
+    await scheduler.stop()

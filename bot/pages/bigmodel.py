@@ -5,7 +5,10 @@ from enum import Enum
 from dataclasses import dataclass
 from datetime import datetime
 
-from playwright.async_api import Page, BrowserContext, TimeoutError
+try:
+    from playwright.async_api import Page, BrowserContext
+except ImportError:  # pragma: no cover - exercised only in minimal test envs
+    Page = BrowserContext = Any
 
 from bot.navigator import PageNavigator, create_navigator
 from bot.session import Session
@@ -31,6 +34,18 @@ class ProductInfo:
 
 class BigModelPage:
     BASE_URL = "https://bigmodel.cn"
+    BUY_KEYWORDS = ("购买", "立即购买", "立即开通", "立即抢购", "预约", "订阅", "去购买")
+    BUY_BLOCKLIST = ("帮助", "客服", "详情", "登录", "注册", "取消", "关闭")
+    CONFIRM_KEYWORDS = ("确认购买", "立即支付", "去支付", "确认", "继续")
+    AUTHENTICATED_SELECTORS = (
+        "[class*='avatar']",
+        "[data-testid*='avatar']",
+        "[href*='/user']",
+        "[href*='/account']",
+        "button:has-text('退出')",
+        "button:has-text('登出')",
+    )
+    LOGGED_OUT_HINTS = ("登录", "手机号登录", "验证码登录", "注册")
 
     def __init__(
         self,
@@ -185,7 +200,7 @@ class BigModelPage:
             if login_button:
                 await login_button.click()
                 await asyncio.sleep(3)
-                return True
+                return await self._is_logged_in()
 
             logger.warning("Could not find login button")
             return False
@@ -216,7 +231,7 @@ class BigModelPage:
             await self.page.reload()
             await asyncio.sleep(3)
             logger.info("Cookies applied and page reloaded")
-            return True
+            return await self._is_logged_in()
 
         except Exception as e:
             logger.error(f"Cookie login error: {e}")
@@ -236,33 +251,21 @@ class BigModelPage:
 
             buy_button = None
 
-            # First try: look for buttons with specific text
-            buttons = await self.page.query_selector_all('button')
-            for btn in buttons:
+            elements = await self.page.query_selector_all(
+                'button, [role="button"], a, [class*="btn"], [class*="button"]'
+            )
+            for elem in elements:
                 try:
-                    text = (await btn.inner_text()).strip()
-                    if any(kw in text for kw in ['购买', '立即', '预约']):
-                        buy_button = btn
-                        logger.info(f"Found buy button with text: {text}")
-                        break
-                except:
-                    continue
-
-            # Second try: look for any clickable elements
-            if not buy_button:
-                elements = await self.page.query_selector_all('button, [role="button"], [class*="btn"], [class*="button"]')
-                for elem in elements:
-                    try:
-                        text = (await elem.inner_text()).strip()
-                        if len(text) > 0 and len(text) < 20:  # Reasonable button text length
-                            # Check if it's not the disabled/out of stock button
-                            classes = await elem.get_attribute('class') or ''
-                            if 'disabled' not in classes.lower():
-                                buy_button = elem
-                                logger.info(f"Found potential button: {text}")
-                                break
-                    except:
+                    text = (await elem.inner_text()).strip()
+                    if not self._looks_like_purchase_action(text):
                         continue
+                    if not await self._element_is_enabled(elem):
+                        continue
+                    buy_button = elem
+                    logger.info(f"Found buy button with text: {text}")
+                    break
+                except Exception:
+                    continue
 
             if buy_button:
                 logger.info("Clicking buy button...")
@@ -275,10 +278,10 @@ class BigModelPage:
                 for elem in confirm_elements:
                     try:
                         text = (await elem.inner_text()).strip()
-                        if any(kw in text for kw in ['确认', '确定', '立即', '继续']):
+                        if any(kw in text for kw in self.CONFIRM_KEYWORDS) and await self._element_is_enabled(elem):
                             confirm_button = elem
                             break
-                    except:
+                    except Exception:
                         continue
 
                 if confirm_button:
@@ -310,6 +313,53 @@ class BigModelPage:
             import traceback
             traceback.print_exc()
             return False, None
+
+    async def _is_logged_in(self) -> bool:
+        """Best-effort login verification after cookie or password login."""
+        for selector in self.AUTHENTICATED_SELECTORS:
+            try:
+                element = await self.page.query_selector(selector)
+                if element:
+                    return True
+            except Exception:
+                continue
+
+        try:
+            body_text = await self.page.inner_text('body')
+        except Exception:
+            return False
+
+        if any(hint in body_text for hint in self.LOGGED_OUT_HINTS):
+            logger.warning("Login validation still sees logged-out hints")
+            return False
+
+        return False
+
+    async def _element_is_enabled(self, element) -> bool:
+        """Return whether an element appears clickable."""
+        try:
+            disabled_attr = await element.get_attribute('disabled')
+            aria_disabled = await element.get_attribute('aria-disabled')
+            classes = (await element.get_attribute('class')) or ''
+        except Exception:
+            return False
+
+        if disabled_attr is not None:
+            return False
+        if aria_disabled and aria_disabled.lower() == 'true':
+            return False
+        if 'disabled' in classes.lower():
+            return False
+        return True
+
+    def _looks_like_purchase_action(self, text: str) -> bool:
+        """Keep button matching conservative to avoid accidental clicks."""
+        if not text:
+            return False
+        normalized = text.strip()
+        if any(keyword in normalized for keyword in self.BUY_BLOCKLIST):
+            return False
+        return any(keyword in normalized for keyword in self.BUY_KEYWORDS)
 
     async def save_screenshot(self, path: Optional[str] = None) -> bytes:
         """Take a screenshot"""

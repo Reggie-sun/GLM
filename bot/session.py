@@ -3,7 +3,10 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
-from playwright.async_api import BrowserContext
+try:
+    from playwright.async_api import BrowserContext
+except ImportError:  # pragma: no cover - exercised only in minimal test envs
+    BrowserContext = Any
 
 
 class Session:

@@ -2,7 +2,11 @@ import asyncio
 from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+try:
+    from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+except ImportError:  # pragma: no cover - exercised only in minimal test envs
+    async_playwright = None
+    Browser = BrowserContext = Page = Any
 
 from bot.config import BrowserConfig, get_browser_config
 from bot.proxy import ProxyConfig
@@ -19,6 +23,8 @@ class BrowserManager:
         """Start the browser"""
         if self._browser:
             return
+        if async_playwright is None:
+            raise RuntimeError("playwright is not installed")
 
         self._playwright = await async_playwright().start()
         launch_options = {

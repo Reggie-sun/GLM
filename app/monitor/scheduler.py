@@ -36,6 +36,9 @@ class MonitorScheduler:
             task.cancel()
             self._tasks.pop(task_id, None)
             self._registry.update_status(task_id, TaskStatus.STOPPED)
+        if self.browser_manager:
+            await self.browser_manager.close()
+            self.browser_manager = None
         logger.info("Monitor scheduler stopped")
 
     async def start_monitor(self, task: MonitorTask) -> str:
@@ -67,7 +70,11 @@ class MonitorScheduler:
         """Main monitoring loop"""
         last_status: Optional[StockStatus] = None
 
-        while self._running and task.status == TaskStatus.RUNNING:
+        while task.status == TaskStatus.RUNNING:
+            if not self._running:
+                await asyncio.sleep(0.1)
+                continue
+
             try:
                 logger.info(f"Checking stock for task: {task.name}")
 
@@ -86,11 +93,14 @@ class MonitorScheduler:
                         except Exception as e:
                             logger.error(f"Error in stock change callback: {e}")
 
-                    # Auto purchase if enabled and in stock
-                    if task.auto_purchase and current_status == StockStatus.IN_STOCK:
-                        logger.info(f"Stock available, attempting purchase: {task.name}")
-                        purchase_result = await self._attempt_purchase(task)
-                        result["purchase_result"] = purchase_result
+                if current_status != StockStatus.IN_STOCK:
+                    task.purchase_attempted = False
+
+                if task.auto_purchase and current_status == StockStatus.IN_STOCK and not task.purchase_attempted:
+                    logger.info(f"Stock available, attempting purchase: {task.name}")
+                    purchase_result = await self._attempt_purchase(task)
+                    task.purchase_attempted = True
+                    result["purchase_result"] = purchase_result
 
                 last_status = current_status
                 self._registry.update_status(task.task_id, TaskStatus.RUNNING, result)
@@ -105,11 +115,8 @@ class MonitorScheduler:
         """Check stock once - navigates to GLM Coding page"""
         try:
             # Create browser context and page
-            if not self.browser_manager:
-                from bot.browser import get_browser_manager
-                self.browser_manager = get_browser_manager()
-
-            context = await self.browser_manager.create_context()
+            browser_manager = await self._get_or_create_browser_manager()
+            context = await browser_manager.create_context()
             page = await create_bigmodel_page(context)
 
             # Navigate to GLM Coding product page and check
@@ -143,6 +150,7 @@ class MonitorScheduler:
 
     async def _attempt_purchase(self, task: MonitorTask) -> Dict[str, Any]:
         """Attempt purchase"""
+        db_generator = None
         try:
             logger.info(f"Attempting purchase for task: {task.name}")
 
@@ -154,7 +162,8 @@ class MonitorScheduler:
                     "attempted_at": datetime.now().isoformat(),
                 }
             else:
-                db: Session = next(get_db())
+                db_generator = get_db()
+                db: Session = next(db_generator)
                 db_account = account.get(db, id=task.account_id)
 
                 if not db_account:
@@ -221,16 +230,16 @@ class MonitorScheduler:
                 logger.error(f"Failed to send notification: {e}")
 
             return result
+        finally:
+            if db_generator is not None and hasattr(db_generator, "close"):
+                db_generator.close()
 
     async def _execute_purchase_flow(self, task: MonitorTask, db_account: Account) -> Dict[str, Any]:
         """Execute the actual purchase flow with cookies"""
         try:
             # Create browser context and page
-            if not self.browser_manager:
-                from bot.browser import get_browser_manager
-                self.browser_manager = get_browser_manager()
-
-            context = await self.browser_manager.create_context()
+            browser_manager = await self._get_or_create_browser_manager()
+            context = await browser_manager.create_context()
             page = await create_bigmodel_page(context)
 
             # Login with cookies FIRST (preferred method)
@@ -281,6 +290,12 @@ class MonitorScheduler:
                 "error": str(e),
                 "attempted_at": datetime.now().isoformat(),
             }
+
+    async def _get_or_create_browser_manager(self) -> BrowserManager:
+        """Create the browser manager lazily and reuse it across checks."""
+        if not self.browser_manager:
+            self.browser_manager = BrowserManager()
+        return self.browser_manager
 
     def get_task(self, task_id: str) -> Optional[MonitorTask]:
         """Get a task by ID"""

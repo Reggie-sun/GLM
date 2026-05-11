@@ -31,6 +31,7 @@ class MonitorTask:
     auto_purchase: bool = False
     account_id: Optional[int] = None  # New field
     on_stock_change: Optional[Callable] = None
+    purchase_attempted: bool = False
 
     def __post_init__(self):
         if not self.task_id:

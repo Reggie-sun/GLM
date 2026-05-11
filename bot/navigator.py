@@ -1,6 +1,13 @@
 import asyncio
 from typing import Optional, Dict, Any
-from playwright.async_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
+
+try:
+    from playwright.async_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
+except ImportError:  # pragma: no cover - exercised only in minimal test envs
+    Page = Locator = Any
+
+    class PlaywrightTimeoutError(Exception):
+        """Fallback timeout error used when Playwright is unavailable."""
 
 
 class PageNavigator:

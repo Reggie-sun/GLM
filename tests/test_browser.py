@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import AsyncMock, Mock
 
 from bot.browser import BrowserManager
 from bot.config import BrowserConfig, get_browser_config
@@ -136,7 +137,6 @@ def test_page_navigator_import():
 async def test_bigmodel_page_login():
     """Test BigModelPage login method structure"""
     from bot.pages.bigmodel import BigModelPage
-    from unittest.mock import AsyncMock, Mock
 
     # Create mock page and navigator
     mock_page = Mock()
@@ -159,7 +159,6 @@ async def test_bigmodel_page_login():
 async def test_bigmodel_page_purchase():
     """Test BigModelPage purchase method structure"""
     from bot.pages.bigmodel import BigModelPage
-    from unittest.mock import AsyncMock, Mock
 
     # Create mock page and navigator
     mock_page = Mock()
@@ -177,6 +176,47 @@ async def test_bigmodel_page_purchase():
     # Result should be tuple of (bool, Optional[str])
     assert isinstance(success, bool)
     assert order_id is None or isinstance(order_id, str)
+
+
+@pytest.mark.asyncio
+async def test_login_with_cookies_requires_logged_in_signal():
+    """Cookie login should fail when the page still looks logged out."""
+    from bot.pages.bigmodel import BigModelPage
+
+    mock_page = Mock()
+    mock_page.context = Mock()
+    mock_page.context.add_cookies = AsyncMock()
+    mock_page.reload = AsyncMock()
+    mock_page.query_selector = AsyncMock(return_value=None)
+    mock_page.inner_text = AsyncMock(return_value="请先登录\n手机号登录")
+
+    page = BigModelPage(mock_page, Mock())
+
+    result = await page.login_with_cookies([{"name": "session", "value": "abc"}])
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_purchase_does_not_click_non_purchase_button():
+    """Purchase should ignore unrelated clickable elements."""
+    from bot.pages.bigmodel import BigModelPage
+
+    help_button = Mock()
+    help_button.inner_text = AsyncMock(return_value="帮助")
+    help_button.get_attribute = AsyncMock(return_value="")
+    help_button.click = AsyncMock()
+
+    mock_page = Mock()
+    mock_page.query_selector_all = AsyncMock(side_effect=[[help_button], [help_button]])
+    mock_page.inner_text = AsyncMock(return_value="当前页面只有帮助按钮")
+
+    page = BigModelPage(mock_page, Mock())
+    success, order_id = await page.purchase()
+
+    assert success is False
+    assert order_id is None
+    help_button.click.assert_not_called()
 
 
 # Note: Full browser tests are not run by default as they require Playwright browsers
