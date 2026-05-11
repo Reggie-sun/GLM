@@ -281,5 +281,91 @@ async def test_check_stock_detects_real_subscribe_button():
     assert product.status == StockStatus.IN_STOCK
 
 
+@pytest.mark.asyncio
+async def test_check_stock_treats_disabled_package_buttons_as_out_of_stock():
+    """Disabled live package buttons should not be treated as purchasable stock."""
+    from bot.pages.bigmodel import BigModelPage
+
+    disabled_buy_button = Mock()
+    disabled_buy_button.inner_text = AsyncMock(return_value="抢购人数过多，请刷新再试")
+    disabled_buy_button.get_attribute = AsyncMock(
+        side_effect=lambda name: "el-button buy-btn is-disabled disabled" if name == "class" else None
+    )
+    disabled_buy_button.bounding_box = AsyncMock(return_value={"x": 10, "y": 10, "width": 120, "height": 40})
+
+    hero_button = Mock()
+    hero_button.inner_text = AsyncMock(return_value="即刻订阅")
+    hero_button.get_attribute = AsyncMock(side_effect=lambda name: "el-button el-button--default" if name == "class" else None)
+    hero_button.bounding_box = AsyncMock(return_value={"x": 10, "y": 10, "width": 120, "height": 40})
+
+    mock_page = Mock()
+
+    async def query_selector_all(selector):
+        if selector == "button.buy-btn":
+            return [disabled_buy_button]
+        if selector == '.package-card-btn-box button':
+            return [disabled_buy_button]
+        if selector == '.subscribe-container button':
+            return [hero_button]
+        if selector == 'button, [role="button"], a, [class*="btn"], [class*="button"]':
+            return [hero_button, disabled_buy_button]
+        return []
+
+    mock_page.query_selector_all = AsyncMock(side_effect=query_selector_all)
+    mock_page.inner_text = AsyncMock(return_value="GLM Coding Plan\n抢购人数过多，请刷新再试\n即刻订阅")
+
+    page = BigModelPage(mock_page, Mock())
+    status, product = await page.check_stock()
+
+    assert status == StockStatus.OUT_OF_STOCK
+    assert product.status == StockStatus.OUT_OF_STOCK
+
+
+@pytest.mark.asyncio
+async def test_purchase_does_not_fall_back_to_hero_when_package_buttons_disabled():
+    """When live package buttons are disabled, purchase should not click the hero CTA."""
+    from bot.pages.bigmodel import BigModelPage
+
+    disabled_buy_button = Mock()
+    disabled_buy_button.inner_text = AsyncMock(return_value="抢购人数过多，请刷新再试")
+    disabled_buy_button.get_attribute = AsyncMock(
+        side_effect=lambda name: "el-button buy-btn is-disabled disabled" if name == "class" else None
+    )
+    disabled_buy_button.bounding_box = AsyncMock(return_value={"x": 10, "y": 10, "width": 120, "height": 40})
+    disabled_buy_button.click = AsyncMock()
+
+    hero_button = Mock()
+    hero_button.inner_text = AsyncMock(return_value="即刻订阅")
+    hero_button.get_attribute = AsyncMock(side_effect=lambda name: "el-button el-button--default" if name == "class" else None)
+    hero_button.bounding_box = AsyncMock(return_value={"x": 10, "y": 10, "width": 120, "height": 40})
+    hero_button.click = AsyncMock()
+
+    mock_page = Mock()
+
+    async def query_selector_all(selector):
+        if selector == "button.buy-btn":
+            return [disabled_buy_button]
+        if selector == '.package-card-btn-box button':
+            return [disabled_buy_button]
+        if selector == '.subscribe-container button':
+            return [hero_button]
+        if selector == 'button, [role="button"], a, [class*="btn"], [class*="button"]':
+            return [hero_button, disabled_buy_button]
+        if selector == "button":
+            return [disabled_buy_button, hero_button]
+        return []
+
+    mock_page.query_selector_all = AsyncMock(side_effect=query_selector_all)
+    mock_page.inner_text = AsyncMock(return_value="GLM Coding Plan\n抢购人数过多，请刷新再试\n即刻订阅")
+
+    page = BigModelPage(mock_page, Mock())
+    success, order_id = await page.purchase()
+
+    assert success is False
+    assert order_id is None
+    disabled_buy_button.click.assert_not_called()
+    hero_button.click.assert_not_called()
+
+
 # Note: Full browser tests are not run by default as they require Playwright browsers
 # These are just import and basic functionality tests

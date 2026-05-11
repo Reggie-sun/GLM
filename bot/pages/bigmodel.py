@@ -48,10 +48,12 @@ class BigModelPage:
     )
     BUY_BLOCKLIST = ("帮助", "客服", "详情", "登录", "注册", "取消", "关闭", "暂不订阅")
     CONFIRM_KEYWORDS = ("确认购买", "立即支付", "去支付", "确认", "继续")
-    BUY_BUTTON_SELECTORS = (
+    PACKAGE_BUTTON_SELECTORS = (
         "button.buy-btn",
         "button[name='特惠订阅']",
         ".package-card-btn-box button",
+    )
+    HERO_BUTTON_SELECTORS = (
         ".subscribe-container button",
     )
     AUTHENTICATED_SELECTORS = (
@@ -103,11 +105,16 @@ class BigModelPage:
                 last_updated=datetime.now()
             )
 
-            buy_buttons = await self._find_purchase_buttons()
+            package_buttons = await self._find_elements(self.PACKAGE_BUTTON_SELECTORS)
+            actionable_package_buttons = await self._filter_purchase_buttons(package_buttons)
 
-            if buy_buttons:
+            if actionable_package_buttons:
                 product_info.status = StockStatus.IN_STOCK
-                logger.info("Found actionable subscribe button - In stock")
+                logger.info("Found actionable package subscribe button - In stock")
+
+            elif await self._has_blocked_package_buttons(package_buttons, body_text):
+                product_info.status = StockStatus.OUT_OF_STOCK
+                logger.info("Found disabled package subscribe button - Out of stock")
 
             # Check for out of stock text
             elif '暂时售罄' in body_text:
@@ -344,11 +351,28 @@ class BigModelPage:
         return False
 
     async def _find_purchase_buttons(self) -> list:
-        """Find visible and enabled purchase buttons using live-page selectors first."""
+        """Prefer real package purchase buttons, then fall back to hero CTA only if needed."""
+        package_buttons = await self._find_elements(self.PACKAGE_BUTTON_SELECTORS)
+        actionable_package_buttons = await self._filter_purchase_buttons(package_buttons)
+        if package_buttons:
+            return actionable_package_buttons
+
+        hero_buttons = await self._find_elements(self.HERO_BUTTON_SELECTORS)
+        actionable_hero_buttons = await self._filter_purchase_buttons(hero_buttons)
+        if actionable_hero_buttons:
+            return actionable_hero_buttons
+
+        generic_elements = await self._find_elements(
+            ('button, [role="button"], a, [class*="btn"], [class*="button"]',)
+        )
+        return await self._filter_purchase_buttons(generic_elements)
+
+    async def _find_elements(self, selectors: tuple[str, ...]) -> list:
+        """Collect unique elements for the given selectors."""
         found = []
         seen = set()
 
-        for selector in self.BUY_BUTTON_SELECTORS:
+        for selector in selectors:
             try:
                 elements = await self.page.query_selector_all(selector)
             except Exception:
@@ -357,27 +381,38 @@ class BigModelPage:
             for element in elements:
                 if id(element) in seen:
                     continue
-                if not await self._element_is_actionable_purchase(element):
-                    continue
                 found.append(element)
                 seen.add(id(element))
 
-        try:
-            generic_elements = await self.page.query_selector_all(
-                'button, [role="button"], a, [class*="btn"], [class*="button"]'
-            )
-        except Exception:
-            generic_elements = []
-
-        for element in generic_elements:
-            if id(element) in seen:
-                continue
-            if not await self._element_is_actionable_purchase(element):
-                continue
-            found.append(element)
-            seen.add(id(element))
-
         return found
+
+    async def _filter_purchase_buttons(self, elements: list) -> list:
+        """Keep only actionable purchase CTAs from a list of elements."""
+        actionable = []
+        for element in elements:
+            if await self._element_is_actionable_purchase(element):
+                actionable.append(element)
+        return actionable
+
+    async def _has_blocked_package_buttons(self, elements: list, body_text: str) -> bool:
+        """Detect sold-out or rate-limited package buttons on the live page."""
+        if not elements:
+            return False
+        if "抢购人数过多，请刷新再试" in body_text:
+            return True
+
+        for element in elements:
+            try:
+                text = (await element.inner_text()).strip()
+            except Exception:
+                continue
+            if not self._looks_like_purchase_action(text) and "抢购人数过多" not in text:
+                continue
+            if not await self._element_is_visible(element):
+                continue
+            if not await self._element_is_enabled(element):
+                return True
+        return False
 
     async def _element_is_actionable_purchase(self, element) -> bool:
         """Whether this element looks like a real purchase CTA on the live page."""
@@ -437,6 +472,8 @@ class BigModelPage:
         if not text:
             return False
         normalized = text.strip()
+        if len(normalized) > 24:
+            return False
         if any(keyword in normalized for keyword in self.BUY_BLOCKLIST):
             return False
         return any(keyword in normalized for keyword in self.BUY_KEYWORDS)
