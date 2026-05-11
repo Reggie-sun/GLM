@@ -12,7 +12,12 @@ from app.models.account import Account
 from bot.browser import BrowserManager
 from bot.pages.bigmodel import BigModelPage, create_bigmodel_page
 from bot.pages.bigmodel import StockStatus
-from app.notifications import get_notification_service, Notification, NotificationLevel
+from app.notifications import (
+    get_notification_service,
+    Notification,
+    NotificationLevel,
+    WebhookNotificationChannel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +90,8 @@ class MonitorScheduler:
                 # Check for status change
                 if last_status is not None and current_status != last_status:
                     logger.info(f"Stock status changed: {last_status} -> {current_status}")
+
+                    await self._notify_stock_change(task, last_status, current_status, result)
 
                     # Call status change callback if any
                     if task.on_stock_change:
@@ -253,6 +260,42 @@ class MonitorScheduler:
             if db_generator is not None and hasattr(db_generator, "close"):
                 db_generator.close()
 
+    async def _notify_stock_change(
+        self,
+        task: MonitorTask,
+        previous_status: StockStatus,
+        current_status: StockStatus,
+        result: Dict[str, Any],
+    ) -> None:
+        """Send a notification when a stock status changes."""
+        try:
+            notification = Notification(
+                title="Stock Status Changed",
+                message=(
+                    f"{task.name} stock changed from "
+                    f"{self._status_value(previous_status)} to {self._status_value(current_status)}"
+                ),
+                level=self._status_to_notification_level(current_status),
+                data={
+                    "task_id": task.task_id,
+                    "task_name": task.name,
+                    "target_url": task.target_url,
+                    "product": result.get("product"),
+                    "previous_status": self._status_value(previous_status),
+                    "current_status": self._status_value(current_status),
+                    "checked_at": result.get("checked_at"),
+                },
+            )
+
+            notification_service = get_notification_service()
+            await notification_service.send(notification)
+
+            if task.webhook_url:
+                webhook_channel = WebhookNotificationChannel(task.webhook_url)
+                await webhook_channel.send(notification)
+        except Exception as e:
+            logger.error(f"Failed to send stock change notification: {e}")
+
     async def _execute_purchase_flow(self, task: MonitorTask, db_account: Account) -> Dict[str, Any]:
         """Execute the actual purchase flow with cookies"""
         try:
@@ -330,6 +373,19 @@ class MonitorScheduler:
     def list_tasks(self) -> list[MonitorTask]:
         """List all tasks"""
         return self._registry.list_all()
+
+    @staticmethod
+    def _status_value(status: StockStatus | str) -> str:
+        return status.value if isinstance(status, StockStatus) else str(status)
+
+    @staticmethod
+    def _status_to_notification_level(status: StockStatus | str) -> NotificationLevel:
+        normalized = status if isinstance(status, StockStatus) else StockStatus(str(status))
+        if normalized == StockStatus.IN_STOCK:
+            return NotificationLevel.SUCCESS
+        if normalized == StockStatus.OUT_OF_STOCK:
+            return NotificationLevel.WARNING
+        return NotificationLevel.ERROR
 
 
 # Global scheduler instance

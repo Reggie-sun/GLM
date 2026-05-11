@@ -30,6 +30,7 @@ class MonitorTask:
     error_message: Optional[str] = None
     auto_purchase: bool = False
     account_id: Optional[int] = None  # New field
+    webhook_url: Optional[str] = None
     on_stock_change: Optional[Callable] = None
     purchase_attempted: bool = False
 

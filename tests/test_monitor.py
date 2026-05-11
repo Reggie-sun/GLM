@@ -1,9 +1,11 @@
 import pytest
 from datetime import datetime
+from unittest.mock import AsyncMock, Mock, patch
 
 from app.monitor.tasks import MonitorTask, TaskStatus, MonitorTaskRegistry
 from app.monitor.scheduler import MonitorScheduler
 from app.notifications import Notification, NotificationLevel, ConsoleNotificationChannel
+from app.api.v1.monitor import CreateMonitorTaskRequest, create_monitor_task
 from bot.pages.bigmodel import StockStatus, ProductInfo, BigModelPage
 
 
@@ -198,3 +200,90 @@ def test_monitor_task_with_account():
 
     assert task.account_id == 1
     assert task.auto_purchase is True
+
+
+def test_monitor_task_with_webhook():
+    """Test monitor task can store a webhook URL."""
+    task = MonitorTask(
+        task_id="webhook-test",
+        name="Webhook Test",
+        target_url="https://example.com",
+        check_interval=30,
+        webhook_url="https://hooks.example.com/glm",
+    )
+
+    assert task.webhook_url == "https://hooks.example.com/glm"
+
+
+@pytest.mark.asyncio
+async def test_create_monitor_task_preserves_webhook_url():
+    """Create monitor task API should persist webhook URL on the task and response."""
+    created_task = MonitorTask(
+        task_id="task-with-webhook",
+        name="Webhook API Test",
+        target_url="https://example.com",
+        check_interval=30,
+        webhook_url="https://hooks.example.com/glm",
+    )
+
+    mock_scheduler = Mock()
+    mock_scheduler.start_monitor = AsyncMock(return_value=created_task.task_id)
+    mock_scheduler.get_task.return_value = created_task
+
+    request = CreateMonitorTaskRequest(
+        name="Webhook API Test",
+        target_url="https://example.com",
+        check_interval=30,
+        webhook_url="https://hooks.example.com/glm",
+    )
+
+    with patch("app.api.v1.monitor.get_monitor_scheduler", return_value=mock_scheduler):
+        response = await create_monitor_task(request)
+
+    assert response.webhook_url == "https://hooks.example.com/glm"
+    started_task = mock_scheduler.start_monitor.await_args.args[0]
+    assert started_task.webhook_url == "https://hooks.example.com/glm"
+
+
+@pytest.mark.asyncio
+async def test_stock_change_notification_uses_console_and_webhook():
+    """Stock change notifications should fan out to console and task webhook."""
+    scheduler = MonitorScheduler()
+    task = MonitorTask(
+        task_id="notify-test",
+        name="Notify Test",
+        target_url="https://example.com",
+        check_interval=30,
+        webhook_url="https://hooks.example.com/glm",
+    )
+
+    result = {
+        "status": StockStatus.IN_STOCK,
+        "product": "GLM Coding",
+        "checked_at": datetime.now().isoformat(),
+    }
+
+    with patch("app.monitor.scheduler.get_notification_service") as mock_get_notification_service:
+        mock_service = Mock()
+        mock_service.send = AsyncMock(return_value={"console": True})
+        mock_get_notification_service.return_value = mock_service
+
+        with patch("app.monitor.scheduler.WebhookNotificationChannel") as mock_webhook_channel:
+            webhook_channel = Mock()
+            webhook_channel.send = AsyncMock(return_value=True)
+            mock_webhook_channel.return_value = webhook_channel
+
+            await scheduler._notify_stock_change(
+                task,
+                StockStatus.OUT_OF_STOCK,
+                StockStatus.IN_STOCK,
+                result,
+            )
+
+    notification = mock_service.send.await_args.args[0]
+    assert notification.title == "Stock Status Changed"
+    assert notification.level == NotificationLevel.SUCCESS
+    assert notification.data["previous_status"] == StockStatus.OUT_OF_STOCK.value
+    assert notification.data["current_status"] == StockStatus.IN_STOCK.value
+    mock_webhook_channel.assert_called_once_with("https://hooks.example.com/glm")
+    webhook_channel.send.assert_awaited_once_with(notification)
