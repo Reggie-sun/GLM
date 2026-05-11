@@ -1,7 +1,11 @@
 from pathlib import Path
 
 from app.services.purchase_capture import (
+    CaptureEvent,
+    build_endpoint_summary,
+    build_replay_template,
     ensure_output_dir,
+    extract_product_snapshot,
     is_interesting_url,
     sanitize_headers,
 )
@@ -33,3 +37,89 @@ def test_ensure_output_dir_creates_timestamped_directory(tmp_path: Path):
     assert output_dir.exists()
     assert output_dir.parent == tmp_path
     assert output_dir.name.startswith("purchase_capture_")
+
+
+def test_extract_product_snapshot_reads_batch_preview_products():
+    response_body = """
+    {
+      "code": 200,
+      "msg": "ok",
+      "success": true,
+      "data": {
+        "productList": [
+          {
+            "productId": "product-1",
+            "productName": "Lite",
+            "payAmount": 132.3,
+            "renewAmount": 132.3,
+            "soldOut": true,
+            "forbidden": false
+          }
+        ]
+      }
+    }
+    """
+
+    snapshot = extract_product_snapshot(response_body)
+
+    assert snapshot == [
+        {
+            "productId": "product-1",
+            "productName": "Lite",
+            "payAmount": 132.3,
+            "renewAmount": 132.3,
+            "soldOut": True,
+            "forbidden": False,
+            "canPurchase": None,
+            "canRepurchase": None,
+        }
+    ]
+
+
+def test_build_replay_template_uses_placeholders_for_sensitive_headers():
+    event = CaptureEvent(
+        timestamp="2026-05-11T00:00:00",
+        method="POST",
+        url="https://bigmodel.cn/api/biz/pay/batch-preview",
+        status=200,
+        request_headers={
+            "authorization": "<redacted>",
+            "bigmodel-organization": "org-1",
+            "bigmodel-project": "proj-1",
+            "content-type": "application/json;charset=UTF-8",
+            ":authority": "bigmodel.cn",
+        },
+        response_headers={"content-type": "application/json"},
+        request_body='{"invitationCode":""}',
+        response_body='{"code":200,"success":true,"data":{"productList":[]}}',
+    )
+
+    template = build_replay_template(event)
+
+    assert template["headers"]["authorization"] == "<paste Authorization header from browser>"
+    assert template["headers"]["bigmodel-organization"] == (
+        "<paste bigmodel-organization header from browser>"
+    )
+    assert template["headers"]["bigmodel-project"] == "<paste bigmodel-project header from browser>"
+    assert ":authority" not in template["headers"]
+    assert template["body"] == {"invitationCode": ""}
+
+
+def test_build_endpoint_summary_extracts_response_shape():
+    event = CaptureEvent(
+        timestamp="2026-05-11T00:00:00",
+        method="POST",
+        url="https://bigmodel.cn/api/biz/pay/batch-preview",
+        status=200,
+        request_headers={"content-type": "application/json"},
+        response_headers={"content-type": "application/json"},
+        request_body='{"invitationCode":""}',
+        response_body='{"code":200,"msg":"ok","success":true,"data":{"bizId":"biz-1","productList":[]}}',
+    )
+
+    summary = build_endpoint_summary(event)
+
+    assert summary.response_code == 200
+    assert summary.response_success is True
+    assert summary.response_message == "ok"
+    assert summary.response_data_keys == ["bizId", "productList"]

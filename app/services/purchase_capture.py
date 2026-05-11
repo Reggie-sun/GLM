@@ -39,6 +39,11 @@ TEXTUAL_CONTENT_TYPES = (
     "application/x-javascript",
     "text/",
 )
+REPLAY_HEADER_PLACEHOLDERS = {
+    "authorization": "<paste Authorization header from browser>",
+    "bigmodel-organization": "<paste bigmodel-organization header from browser>",
+    "bigmodel-project": "<paste bigmodel-project header from browser>",
+}
 
 
 @dataclass
@@ -64,6 +69,19 @@ class CaptureSummary:
     restock_time: Optional[str]
     output_dir: str
     event_count: int
+
+
+@dataclass
+class EndpointSummary:
+    method: str
+    url: str
+    status: int
+    request_header_names: list[str]
+    request_body: Optional[Any]
+    response_code: Optional[int]
+    response_success: Optional[bool]
+    response_message: Optional[str]
+    response_data_keys: list[str]
 
 
 def sanitize_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -97,6 +115,111 @@ def _append_jsonl(path: Path, data: dict[str, Any]) -> None:
 
 def _textual_content_type(content_type: str) -> bool:
     return any(content_type.startswith(prefix) for prefix in TEXTUAL_CONTENT_TYPES)
+
+
+def try_parse_json(text: Optional[str]) -> Optional[Any]:
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def extract_product_snapshot(response_body: str) -> list[dict[str, Any]]:
+    payload = try_parse_json(response_body)
+    if not isinstance(payload, dict):
+        return []
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return []
+
+    product_list = data.get("productList")
+    if not isinstance(product_list, list):
+        return []
+
+    snapshot: list[dict[str, Any]] = []
+    for item in product_list:
+        if not isinstance(item, dict):
+            continue
+        snapshot.append(
+            {
+                "productId": item.get("productId"),
+                "productName": item.get("productName"),
+                "payAmount": item.get("payAmount"),
+                "renewAmount": item.get("renewAmount"),
+                "soldOut": item.get("soldOut"),
+                "forbidden": item.get("forbidden"),
+                "canPurchase": item.get("canPurchase"),
+                "canRepurchase": item.get("canRepurchase"),
+            }
+        )
+    return snapshot
+
+
+def build_endpoint_summary(event: CaptureEvent) -> EndpointSummary:
+    request_body = try_parse_json(event.request_body) if event.request_body else event.request_body
+    response_json = try_parse_json(event.response_body)
+    response_data = response_json.get("data") if isinstance(response_json, dict) else None
+    response_data_keys = sorted(response_data.keys()) if isinstance(response_data, dict) else []
+    return EndpointSummary(
+        method=event.method,
+        url=event.url,
+        status=event.status,
+        request_header_names=sorted(event.request_headers.keys()),
+        request_body=request_body,
+        response_code=response_json.get("code") if isinstance(response_json, dict) else None,
+        response_success=response_json.get("success") if isinstance(response_json, dict) else None,
+        response_message=response_json.get("msg") if isinstance(response_json, dict) else None,
+        response_data_keys=response_data_keys,
+    )
+
+
+def build_replay_template(event: CaptureEvent) -> dict[str, Any]:
+    headers_template: dict[str, str] = {}
+    for name, value in event.request_headers.items():
+        lowered = name.lower()
+        if lowered in REPLAY_HEADER_PLACEHOLDERS:
+            headers_template[name] = REPLAY_HEADER_PLACEHOLDERS[lowered]
+        elif lowered.startswith(":"):
+            continue
+        elif lowered in {"accept-encoding", "content-length", "cookie"}:
+            continue
+        else:
+            headers_template[name] = value
+
+    return {
+        "method": event.method,
+        "url": event.url,
+        "headers": headers_template,
+        "body": try_parse_json(event.request_body) if event.request_body else None,
+        "notes": [
+            "Authorization, bigmodel-organization, and bigmodel-project must come from a live browser session.",
+            "This template is generated from a captured request with sensitive values removed.",
+        ],
+    }
+
+
+def write_capture_artifacts(output_dir: Path, events: list[CaptureEvent]) -> None:
+    endpoint_summaries = [asdict(build_endpoint_summary(event)) for event in events]
+    _serialize_json(output_dir / "endpoint_summary.json", {"events": endpoint_summaries})
+
+    replay_templates: dict[str, Any] = {}
+    batch_preview_products: list[dict[str, Any]] = []
+    for event in events:
+        if event.url.endswith("/api/biz/pay/batch-preview"):
+            replay_templates["batch_preview"] = build_replay_template(event)
+            batch_preview_products = extract_product_snapshot(event.response_body)
+        elif event.url.endswith("/api/biz/pay/preview"):
+            replay_templates["pay_preview"] = build_replay_template(event)
+        elif event.url.endswith("/api/biz/pay/create-sign"):
+            replay_templates["create_sign"] = build_replay_template(event)
+        elif "/api/biz/pay/check" in event.url:
+            replay_templates["pay_check"] = build_replay_template(event)
+
+    _serialize_json(output_dir / "replay_templates.json", replay_templates)
+    _serialize_json(output_dir / "batch_preview_products.json", {"products": batch_preview_products})
 
 
 def load_account_with_cookies(account_id: int) -> tuple[Account, list[dict[str, Any]]]:
@@ -157,6 +280,7 @@ class PurchaseFlowRecorder:
         self.events_path = output_dir / "events.jsonl"
         self.pending_tasks: set[asyncio.Task] = set()
         self.event_count = 0
+        self.captured_events: list[CaptureEvent] = []
 
     def attach(self, page: BigModelPage) -> None:
         page.page.on("response", self._schedule_response_capture)
@@ -193,6 +317,7 @@ class PurchaseFlowRecorder:
         )
         _append_jsonl(self.events_path, asdict(event))
         self.event_count += 1
+        self.captured_events.append(event)
 
     async def flush(self) -> None:
         if self.pending_tasks:
@@ -263,6 +388,7 @@ async def run_capture_session(
             await asyncio.sleep(hold_seconds)
 
         await recorder.flush()
+        write_capture_artifacts(output_dir, recorder.captured_events)
         summary.event_count = recorder.event_count
         return summary
     finally:

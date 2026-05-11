@@ -123,6 +123,9 @@ async def main() -> int:
         print(f"Restock hint: {summary.restock_time}")
     print(f"Summary: {output_dir / 'summary.json'}")
     print(f"Events: {output_dir / 'events.jsonl'}")
+    print(f"Endpoint summary: {output_dir / 'endpoint_summary.json'}")
+    print(f"Replay templates: {output_dir / 'replay_templates.json'}")
+    print(f"Batch preview products: {output_dir / 'batch_preview_products.json'}")
     return 0
 
 
