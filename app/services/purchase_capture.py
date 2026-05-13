@@ -72,6 +72,44 @@ class CaptureSummary:
 
 
 @dataclass
+class ButtonSnapshot:
+    text: str
+    css_class: Optional[str]
+    enabled: bool
+    visible: bool
+
+
+@dataclass
+class WatchSample:
+    checked_at: str
+    stock_status: str
+    price: Optional[str]
+    restock_time: Optional[str]
+    actionable_package_count: int
+    actionable_hero_count: int
+    package_buttons: list[ButtonSnapshot]
+    hero_buttons: list[ButtonSnapshot]
+    event_count: int
+
+
+@dataclass
+class WatchSummary:
+    started_at: str
+    finished_at: Optional[str]
+    account_id: int
+    account_username: str
+    target_url: str
+    output_dir: str
+    poll_count: int
+    actionable_detected: bool
+    package_click_attempted: bool
+    package_click_triggered: bool
+    first_actionable_at: Optional[str]
+    event_count: int
+    final_stock_status: Optional[str]
+
+
+@dataclass
 class EndpointSummary:
     method: str
     url: str
@@ -111,6 +149,10 @@ def _serialize_json(path: Path, data: dict[str, Any]) -> None:
 def _append_jsonl(path: Path, data: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+
+def _button_snapshot_to_dict(snapshot: ButtonSnapshot) -> dict[str, Any]:
+    return asdict(snapshot)
 
 
 def _textual_content_type(content_type: str) -> bool:
@@ -222,6 +264,15 @@ def write_capture_artifacts(output_dir: Path, events: list[CaptureEvent]) -> Non
     _serialize_json(output_dir / "batch_preview_products.json", {"products": batch_preview_products})
 
 
+def summarize_button_states(buttons: list[ButtonSnapshot]) -> dict[str, Any]:
+    actionable_count = sum(1 for button in buttons if button.enabled and button.visible)
+    return {
+        "total_count": len(buttons),
+        "actionable_count": actionable_count,
+        "texts": [button.text for button in buttons],
+    }
+
+
 def load_account_with_cookies(account_id: int) -> tuple[Account, list[dict[str, Any]]]:
     db = SessionLocal()
     try:
@@ -324,6 +375,60 @@ class PurchaseFlowRecorder:
             await asyncio.gather(*list(self.pending_tasks), return_exceptions=True)
 
 
+async def snapshot_button_states(page: BigModelPage) -> tuple[list[ButtonSnapshot], list[ButtonSnapshot]]:
+    async def _collect(selectors: tuple[str, ...]) -> list[ButtonSnapshot]:
+        snapshots: list[ButtonSnapshot] = []
+        for element in await page._find_elements(selectors):
+            try:
+                snapshots.append(
+                    ButtonSnapshot(
+                        text=(await element.inner_text()).strip(),
+                        css_class=await element.get_attribute("class"),
+                        enabled=await page._element_is_enabled(element),
+                        visible=await page._element_is_visible(element),
+                    )
+                )
+            except Exception:
+                continue
+        return snapshots
+
+    package_buttons = await _collect(page.PACKAGE_BUTTON_SELECTORS)
+    hero_buttons = await _collect(page.HERO_BUTTON_SELECTORS)
+    return package_buttons, hero_buttons
+
+
+async def capture_watch_sample(
+    page: BigModelPage,
+    recorder: PurchaseFlowRecorder,
+    *,
+    checked_at: Optional[str] = None,
+) -> WatchSample:
+    status, product_info = await page.check_stock()
+    package_buttons, hero_buttons = await snapshot_button_states(page)
+    package_summary = summarize_button_states(package_buttons)
+    hero_summary = summarize_button_states(hero_buttons)
+    return WatchSample(
+        checked_at=checked_at or datetime.now().isoformat(),
+        stock_status=status.value,
+        price=product_info.price,
+        restock_time=product_info.restock_time,
+        actionable_package_count=package_summary["actionable_count"],
+        actionable_hero_count=hero_summary["actionable_count"],
+        package_buttons=package_buttons,
+        hero_buttons=hero_buttons,
+        event_count=recorder.event_count,
+    )
+
+
+async def click_first_actionable_package_button(page: BigModelPage) -> bool:
+    package_buttons = await page._find_elements(page.PACKAGE_BUTTON_SELECTORS)
+    actionable_buttons = await page._filter_purchase_buttons(package_buttons)
+    if not actionable_buttons:
+        return False
+    await actionable_buttons[0].click(timeout=5000)
+    return True
+
+
 async def run_capture_session(
     *,
     account_id: int,
@@ -394,6 +499,114 @@ async def run_capture_session(
     finally:
         summary.finished_at = datetime.now().isoformat()
         _serialize_json(output_dir / "summary.json", asdict(summary))
+        if context is not None:
+            await context.close()
+        await browser_manager.close()
+
+
+async def watch_capture_session(
+    *,
+    account_id: int,
+    target_url: str,
+    output_dir: Path,
+    headless: bool,
+    click_hero: bool,
+    refresh_interval: int,
+    watch_seconds: int,
+    stop_on_actionable: bool,
+    click_package_on_actionable: bool,
+    settle_seconds: int,
+) -> WatchSummary:
+    account, cookies = load_account_with_cookies(account_id)
+    browser_manager = BrowserManager()
+    browser_manager.config.headless = headless
+    context: Optional[BrowserContext] = None
+    samples_path = output_dir / "status_samples.jsonl"
+    summary = WatchSummary(
+        started_at=datetime.now().isoformat(),
+        finished_at=None,
+        account_id=account.id,
+        account_username=account.username,
+        target_url=target_url,
+        output_dir=str(output_dir),
+        poll_count=0,
+        actionable_detected=False,
+        package_click_attempted=click_package_on_actionable,
+        package_click_triggered=False,
+        first_actionable_at=None,
+        event_count=0,
+        final_stock_status=None,
+    )
+
+    try:
+        context = await browser_manager.create_context(user_agent=account.user_agent)
+        page = await create_bigmodel_page(context)
+        recorder = PurchaseFlowRecorder(output_dir)
+        recorder.attach(page)
+
+        await page.go_to_home()
+        await asyncio.sleep(1)
+        login_ok = await page.login_with_cookies(cookies)
+        if not login_ok:
+            raise RuntimeError("Cookie login failed before watch capture")
+
+        await page.page.goto(target_url, wait_until="networkidle", timeout=120000)
+
+        if click_hero:
+            hero = page.page.locator(
+                "button:has-text('即刻订阅'), [role='button']:has-text('即刻订阅')"
+            ).first
+            if await hero.count():
+                await hero.click(timeout=5000)
+                if settle_seconds > 0:
+                    await asyncio.sleep(settle_seconds)
+
+        deadline = None if watch_seconds <= 0 else asyncio.get_running_loop().time() + watch_seconds
+
+        while True:
+            sample = await capture_watch_sample(page, recorder)
+            _append_jsonl(
+                samples_path,
+                {
+                    "checked_at": sample.checked_at,
+                    "stock_status": sample.stock_status,
+                    "price": sample.price,
+                    "restock_time": sample.restock_time,
+                    "actionable_package_count": sample.actionable_package_count,
+                    "actionable_hero_count": sample.actionable_hero_count,
+                    "package_buttons": [_button_snapshot_to_dict(button) for button in sample.package_buttons],
+                    "hero_buttons": [_button_snapshot_to_dict(button) for button in sample.hero_buttons],
+                    "event_count": sample.event_count,
+                },
+            )
+            summary.poll_count += 1
+            summary.final_stock_status = sample.stock_status
+
+            if sample.actionable_package_count > 0:
+                summary.actionable_detected = True
+                if summary.first_actionable_at is None:
+                    summary.first_actionable_at = sample.checked_at
+                if click_package_on_actionable and not summary.package_click_triggered:
+                    summary.package_click_triggered = await click_first_actionable_package_button(page)
+                    if settle_seconds > 0:
+                        await asyncio.sleep(settle_seconds)
+                if stop_on_actionable:
+                    break
+
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                break
+
+            await page.page.reload(wait_until="networkidle", timeout=120000)
+            await asyncio.sleep(refresh_interval)
+
+        await recorder.flush()
+        write_capture_artifacts(output_dir, recorder.captured_events)
+        summary.event_count = recorder.event_count
+        await page.page.screenshot(path=str(output_dir / "watch_final.png"), full_page=False)
+        return summary
+    finally:
+        summary.finished_at = datetime.now().isoformat()
+        _serialize_json(output_dir / "watch_summary.json", asdict(summary))
         if context is not None:
             await context.close()
         await browser_manager.close()

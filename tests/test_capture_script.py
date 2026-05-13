@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from app.services.purchase_capture import (
+    ButtonSnapshot,
     CaptureEvent,
     build_endpoint_summary,
     build_replay_template,
@@ -8,6 +9,7 @@ from app.services.purchase_capture import (
     extract_product_snapshot,
     is_interesting_url,
     sanitize_headers,
+    summarize_button_states,
 )
 
 
@@ -123,3 +125,17 @@ def test_build_endpoint_summary_extracts_response_shape():
     assert summary.response_success is True
     assert summary.response_message == "ok"
     assert summary.response_data_keys == ["bizId", "productList"]
+
+
+def test_summarize_button_states_counts_only_enabled_visible_buttons():
+    summary = summarize_button_states(
+        [
+            ButtonSnapshot(text="立即购买", css_class="buy-btn", enabled=True, visible=True),
+            ButtonSnapshot(text="抢购人数过多，请刷新再试", css_class="buy-btn disabled", enabled=False, visible=True),
+            ButtonSnapshot(text="即刻订阅", css_class="hero-btn", enabled=True, visible=False),
+        ]
+    )
+
+    assert summary["total_count"] == 3
+    assert summary["actionable_count"] == 1
+    assert summary["texts"] == ["立即购买", "抢购人数过多，请刷新再试", "即刻订阅"]

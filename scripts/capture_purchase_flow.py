@@ -23,6 +23,7 @@ sys.path.insert(0, str(root))
 from app.services.purchase_capture import (  # noqa: E402
     ensure_output_dir,
     run_capture_session,
+    watch_capture_session,
     wait_for_stock,
 )
 
@@ -79,6 +80,28 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Keep the browser open for additional manual actions before closing",
     )
+    parser.add_argument(
+        "--watch-seconds",
+        type=int,
+        default=0,
+        help="Continuously reload and record button/request state for this many seconds; 0 disables watch mode",
+    )
+    parser.add_argument(
+        "--refresh-interval",
+        type=int,
+        default=5,
+        help="Seconds between page reloads in watch mode",
+    )
+    parser.add_argument(
+        "--stop-on-actionable",
+        action="store_true",
+        help="Stop watch mode as soon as an actionable package purchase button appears",
+    )
+    parser.add_argument(
+        "--click-package-on-actionable",
+        action="store_true",
+        help="When watch mode detects an actionable package button, click only that first-step button and then continue according to --stop-on-actionable",
+    )
     return parser.parse_args()
 
 
@@ -106,22 +129,45 @@ async def main() -> int:
             print("Capture did not start because stock never became available within the wait window.")
             return 1
 
-    summary = await run_capture_session(
-        account_id=args.account_id,
-        target_url=args.target_url,
-        output_dir=output_dir,
-        headless=not args.headed,
-        click_hero=not args.skip_hero_click,
-        settle_seconds=args.settle_seconds,
-        hold_seconds=args.hold_seconds,
-    )
+    if args.watch_seconds > 0:
+        summary = await watch_capture_session(
+            account_id=args.account_id,
+            target_url=args.target_url,
+            output_dir=output_dir,
+            headless=not args.headed,
+            click_hero=not args.skip_hero_click,
+            refresh_interval=args.refresh_interval,
+            watch_seconds=args.watch_seconds,
+            stop_on_actionable=args.stop_on_actionable,
+            click_package_on_actionable=args.click_package_on_actionable,
+            settle_seconds=args.settle_seconds,
+        )
+        print("\nWatch capture complete")
+        print(f"Polls: {summary.poll_count}")
+        print(f"Captured events: {summary.event_count}")
+        print(f"Final stock status: {summary.final_stock_status}")
+        print(f"Actionable package detected: {summary.actionable_detected}")
+        if summary.first_actionable_at:
+            print(f"First actionable detected at: {summary.first_actionable_at}")
+        print(f"Watch summary: {output_dir / 'watch_summary.json'}")
+        print(f"Samples: {output_dir / 'status_samples.jsonl'}")
+    else:
+        summary = await run_capture_session(
+            account_id=args.account_id,
+            target_url=args.target_url,
+            output_dir=output_dir,
+            headless=not args.headed,
+            click_hero=not args.skip_hero_click,
+            settle_seconds=args.settle_seconds,
+            hold_seconds=args.hold_seconds,
+        )
 
-    print("\nCapture complete")
-    print(f"Captured events: {summary.event_count}")
-    print(f"Final stock status: {summary.stock_status}")
-    if summary.restock_time:
-        print(f"Restock hint: {summary.restock_time}")
-    print(f"Summary: {output_dir / 'summary.json'}")
+        print("\nCapture complete")
+        print(f"Captured events: {summary.event_count}")
+        print(f"Final stock status: {summary.stock_status}")
+        if summary.restock_time:
+            print(f"Restock hint: {summary.restock_time}")
+        print(f"Summary: {output_dir / 'summary.json'}")
     print(f"Events: {output_dir / 'events.jsonl'}")
     print(f"Endpoint summary: {output_dir / 'endpoint_summary.json'}")
     print(f"Replay templates: {output_dir / 'replay_templates.json'}")
