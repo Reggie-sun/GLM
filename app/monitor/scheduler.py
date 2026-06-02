@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import json
+import re
 from typing import Dict, Any, Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -20,6 +21,12 @@ from app.notifications import (
 )
 
 logger = logging.getLogger(__name__)
+
+RESTOCK_BURST_WINDOW_SECONDS = 5 * 60
+RESTOCK_HOT_WINDOW_SECONDS = 60
+RESTOCK_POST_WINDOW_SECONDS = 2 * 60
+RESTOCK_BURST_DELAY_SECONDS = 5
+RESTOCK_HOT_DELAY_SECONDS = 2
 
 
 class MonitorScheduler:
@@ -74,6 +81,7 @@ class MonitorScheduler:
     async def _monitor_loop(self, task: MonitorTask):
         """Main monitoring loop"""
         last_status: Optional[StockStatus] = None
+        next_delay = task.check_interval
 
         while task.status == TaskStatus.RUNNING:
             if not self._running:
@@ -100,23 +108,85 @@ class MonitorScheduler:
                         except Exception as e:
                             logger.error(f"Error in stock change callback: {e}")
 
-                if current_status != StockStatus.IN_STOCK:
+                purchase_window_open = current_status in {
+                    StockStatus.IN_STOCK,
+                    StockStatus.HIGH_DEMAND,
+                }
+
+                if not purchase_window_open:
                     task.purchase_attempted = False
 
-                if task.auto_purchase and current_status == StockStatus.IN_STOCK and not task.purchase_attempted:
+                if task.auto_purchase and purchase_window_open and not task.purchase_attempted:
                     logger.info(f"Stock available, attempting purchase: {task.name}")
                     purchase_result = await self._attempt_purchase(task)
-                    task.purchase_attempted = True
+                    task.purchase_attempted = bool(purchase_result.get("success"))
                     result["purchase_result"] = purchase_result
 
                 last_status = current_status
                 self._registry.update_status(task.task_id, TaskStatus.RUNNING, result)
+                next_delay = self._next_check_delay(task, result)
 
             except Exception as e:
                 logger.error(f"Error in monitor loop: {e}")
                 self._registry.update_status(task.task_id, TaskStatus.FAILED, error=str(e))
+                next_delay = task.check_interval
 
-            await asyncio.sleep(task.check_interval)
+            await asyncio.sleep(next_delay)
+
+    def _next_check_delay(
+        self,
+        task: MonitorTask,
+        result: Dict[str, Any],
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Return the next polling delay, with bounded acceleration near restock time."""
+        default_delay = task.check_interval
+        current_status = result.get("status")
+
+        if current_status == StockStatus.HIGH_DEMAND:
+            return min(default_delay, RESTOCK_HOT_DELAY_SECONDS)
+
+        if current_status != StockStatus.OUT_OF_STOCK:
+            return default_delay
+
+        restock_at = self._parse_restock_time(result.get("restock_time"), now=now)
+        if not restock_at:
+            return default_delay
+
+        now = now or datetime.now()
+        seconds_until_restock = (restock_at - now).total_seconds()
+
+        if -RESTOCK_POST_WINDOW_SECONDS <= seconds_until_restock <= RESTOCK_HOT_WINDOW_SECONDS:
+            return min(default_delay, RESTOCK_HOT_DELAY_SECONDS)
+        if RESTOCK_HOT_WINDOW_SECONDS < seconds_until_restock <= RESTOCK_BURST_WINDOW_SECONDS:
+            return min(default_delay, RESTOCK_BURST_DELAY_SECONDS)
+
+        return default_delay
+
+    @staticmethod
+    def _parse_restock_time(restock_time: Optional[str], now: Optional[datetime] = None) -> Optional[datetime]:
+        """Parse strings like '暂时售罄 ｜05月14日 10:00 补货' into a datetime."""
+        if not restock_time:
+            return None
+
+        match = re.search(r"(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})", restock_time)
+        if not match:
+            return None
+
+        now = now or datetime.now()
+        month, day, hour, minute = (int(group) for group in match.groups())
+        try:
+            parsed = datetime(now.year, month, day, hour, minute)
+        except ValueError:
+            return None
+
+        if parsed < now and (now - parsed).days > 1:
+            try:
+                parsed = parsed.replace(year=now.year + 1)
+            except ValueError:
+                return None
+
+        return parsed
 
     async def _check_stock_once(self, task: MonitorTask) -> Dict[str, Any]:
         """Check stock once - navigates to GLM Coding page"""
@@ -319,14 +389,26 @@ class MonitorScheduler:
             await asyncio.sleep(2)
 
             # Attempt purchase
-            purchase_success, order_id = await page.purchase()
+            if hasattr(page, "purchase_detailed"):
+                purchase_result = await page.purchase_detailed()
+            else:
+                purchase_success, order_id = await page.purchase()
+                purchase_result = {
+                    "success": purchase_success,
+                    "order_id": order_id,
+                    "reason": "legacy_purchase_result",
+                    "attempts": None,
+                }
 
             await context.close()
 
             return {
-                "success": purchase_success,
-                "order_id": order_id,
-                "message": "Purchase successful" if purchase_success else "Purchase failed",
+                **purchase_result,
+                "message": (
+                    "Purchase successful"
+                    if purchase_result.get("success")
+                    else f"Purchase failed: {purchase_result.get('reason', 'unknown')}"
+                ),
                 "attempted_at": datetime.now().isoformat(),
             }
 
@@ -383,6 +465,8 @@ class MonitorScheduler:
         normalized = status if isinstance(status, StockStatus) else StockStatus(str(status))
         if normalized == StockStatus.IN_STOCK:
             return NotificationLevel.SUCCESS
+        if normalized == StockStatus.HIGH_DEMAND:
+            return NotificationLevel.WARNING
         if normalized == StockStatus.OUT_OF_STOCK:
             return NotificationLevel.WARNING
         return NotificationLevel.ERROR

@@ -1,0 +1,15 @@
+{
+  "started_at": "2026-06-02T01:37:09.805811",
+  "finished_at": "2026-06-02T01:39:15.721466",
+  "account_id": 1,
+  "account_username": "whdgfr07",
+  "target_url": "https://bigmodel.cn/glm-coding",
+  "output_dir": "/app/data/captures/purchase_capture_20260602_013709",
+  "poll_count": 0,
+  "actionable_detected": false,
+  "package_click_attempted": false,
+  "package_click_triggered": false,
+  "first_actionable_at": null,
+  "event_count": 0,
+  "final_stock_status": null
+}

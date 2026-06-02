@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from bot.browser import BrowserManager
 from bot.config import BrowserConfig, get_browser_config
@@ -187,7 +187,7 @@ async def test_login_with_cookies_requires_logged_in_signal():
     mock_page = Mock()
     mock_page.context = Mock()
     mock_page.context.add_cookies = AsyncMock()
-    mock_page.reload = AsyncMock()
+    mock_page.goto = AsyncMock()
     mock_page.query_selector = AsyncMock(return_value=None)
     mock_page.inner_text = AsyncMock(return_value="请先登录\n手机号登录")
 
@@ -196,6 +196,11 @@ async def test_login_with_cookies_requires_logged_in_signal():
     result = await page.login_with_cookies([{"name": "session", "value": "abc"}])
 
     assert result is False
+    mock_page.goto.assert_awaited_once_with(
+        BigModelPage.BASE_URL,
+        wait_until="domcontentloaded",
+        timeout=30000,
+    )
 
 
 @pytest.mark.asyncio
@@ -282,8 +287,8 @@ async def test_check_stock_detects_real_subscribe_button():
 
 
 @pytest.mark.asyncio
-async def test_check_stock_treats_disabled_package_buttons_as_out_of_stock():
-    """Disabled live package buttons should not be treated as purchasable stock."""
+async def test_check_stock_treats_crowded_package_buttons_as_high_demand():
+    """Crowded live package buttons should trigger a high-demand purchase window."""
     from bot.pages.bigmodel import BigModelPage
 
     disabled_buy_button = Mock()
@@ -317,8 +322,8 @@ async def test_check_stock_treats_disabled_package_buttons_as_out_of_stock():
     page = BigModelPage(mock_page, Mock())
     status, product = await page.check_stock()
 
-    assert status == StockStatus.OUT_OF_STOCK
-    assert product.status == StockStatus.OUT_OF_STOCK
+    assert status == StockStatus.HIGH_DEMAND
+    assert product.status == StockStatus.HIGH_DEMAND
 
 
 @pytest.mark.asyncio
@@ -365,6 +370,184 @@ async def test_purchase_does_not_fall_back_to_hero_when_package_buttons_disabled
     assert order_id is None
     disabled_buy_button.click.assert_not_called()
     hero_button.click.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_purchase_reloads_until_package_button_appears():
+    """Purchase should keep reloading the page until a real package button appears."""
+    from bot.pages.bigmodel import BigModelPage
+
+    buy_button = Mock()
+    buy_button.inner_text = AsyncMock(return_value="特惠订阅")
+    buy_button.get_attribute = AsyncMock(side_effect=lambda name: "el-button buy-btn" if name == "class" else None)
+    buy_button.bounding_box = AsyncMock(return_value={"x": 10, "y": 10, "width": 120, "height": 40})
+    buy_button.click = AsyncMock()
+
+    poll_count = {"value": 0}
+
+    mock_page = Mock()
+    mock_page.reload = AsyncMock()
+    mock_page.inner_text = AsyncMock(return_value="GLM Coding Plan\n订单 创建成功")
+
+    async def query_selector_all(selector):
+        if selector == "button.buy-btn":
+            poll_count["value"] += 1
+            return [] if poll_count["value"] == 1 else [buy_button]
+        if selector == '.package-card-btn-box button':
+            return []
+        if selector == '.subscribe-container button':
+            return []
+        if selector == 'button, [role="button"], a, [class*="btn"], [class*="button"]':
+            return []
+        if selector == "button":
+            return []
+        return []
+
+    mock_page.query_selector_all = AsyncMock(side_effect=query_selector_all)
+
+    page = BigModelPage(mock_page, Mock())
+    with patch("bot.pages.bigmodel.asyncio.sleep", new=AsyncMock()):
+        success, order_id = await page.purchase(timeout=100, refresh_interval=0)
+
+    assert success is True
+    assert order_id is None or isinstance(order_id, str)
+    assert poll_count["value"] >= 2
+    mock_page.reload.assert_awaited_once()
+    buy_button.click.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_purchase_retries_after_crowded_click_failure():
+    """Purchase should keep trying when the first click hits a crowded refresh state."""
+    from bot.pages.bigmodel import BigModelPage
+
+    buy_button = Mock()
+    buy_button.inner_text = AsyncMock(return_value="特惠订阅")
+    buy_button.get_attribute = AsyncMock(
+        side_effect=lambda name: "el-button buy-btn" if name == "class" else None
+    )
+    buy_button.bounding_box = AsyncMock(return_value={"x": 10, "y": 10, "width": 120, "height": 40})
+    buy_button.click = AsyncMock()
+
+    mock_page = Mock()
+    mock_page.reload = AsyncMock()
+    mock_page.inner_text = AsyncMock(
+        side_effect=[
+            "GLM Coding Plan\n抢购人数过多，请刷新再试",
+            "GLM Coding Plan\n订单 创建成功",
+        ]
+    )
+
+    async def query_selector_all(selector):
+        if selector == "button.buy-btn":
+            return [buy_button]
+        if selector == '.package-card-btn-box button':
+            return []
+        if selector == '.subscribe-container button':
+            return []
+        if selector == 'button, [role="button"], a, [class*="btn"], [class*="button"]':
+            return []
+        if selector == "button":
+            return []
+        return []
+
+    mock_page.query_selector_all = AsyncMock(side_effect=query_selector_all)
+
+    page = BigModelPage(mock_page, Mock())
+    with patch("bot.pages.bigmodel.asyncio.sleep", new=AsyncMock()):
+        success, order_id = await page.purchase(timeout=100, refresh_interval=0)
+
+    assert success is True
+    assert order_id is None or isinstance(order_id, str)
+    assert buy_button.click.await_count == 2
+    mock_page.reload.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_purchase_detailed_reports_no_button_timeout_reason():
+    """Detailed purchase results should explain when no purchase button appears."""
+    from bot.pages.bigmodel import BigModelPage
+
+    mock_page = Mock()
+    mock_page.reload = AsyncMock()
+    mock_page.inner_text = AsyncMock(return_value="GLM Coding Plan\n暂时售罄")
+    mock_page.query_selector_all = AsyncMock(return_value=[])
+
+    page = BigModelPage(mock_page, Mock())
+    with patch("bot.pages.bigmodel.asyncio.sleep", new=AsyncMock()):
+        result = await page.purchase_detailed(timeout=0, refresh_interval=0)
+
+    assert result["success"] is False
+    assert result["reason"] == "no_purchase_button"
+    assert result["attempts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_purchase_detailed_reports_crowded_retry_exhausted_reason():
+    """Detailed purchase results should preserve the crowded retry failure reason."""
+    from bot.pages.bigmodel import BigModelPage
+
+    buy_button = Mock()
+    buy_button.inner_text = AsyncMock(return_value="特惠订阅")
+    buy_button.get_attribute = AsyncMock(
+        side_effect=lambda name: "el-button buy-btn" if name == "class" else None
+    )
+    buy_button.bounding_box = AsyncMock(return_value={"x": 10, "y": 10, "width": 120, "height": 40})
+    buy_button.click = AsyncMock()
+
+    mock_page = Mock()
+    mock_page.reload = AsyncMock()
+    mock_page.inner_text = AsyncMock(return_value="GLM Coding Plan\n抢购人数过多，请刷新再试")
+
+    async def query_selector_all(selector):
+        if selector == "button.buy-btn":
+            return [buy_button]
+        if selector == "button":
+            return []
+        return []
+
+    mock_page.query_selector_all = AsyncMock(side_effect=query_selector_all)
+
+    page = BigModelPage(mock_page, Mock())
+    with patch("bot.pages.bigmodel.asyncio.sleep", new=AsyncMock()):
+        result = await page.purchase_detailed(timeout=0, refresh_interval=0)
+
+    assert result["success"] is False
+    assert result["reason"] == "high_demand_retry_exhausted"
+    assert result["attempts"] == 1
+    assert "抢购人数过多" in result["last_body_excerpt"]
+
+
+@pytest.mark.asyncio
+async def test_confirmation_button_must_be_visible():
+    """Hidden confirmation/payment-step buttons should not be clicked."""
+    from bot.pages.bigmodel import BigModelPage
+
+    hidden_button = Mock()
+    hidden_button.inner_text = AsyncMock(return_value="去支付")
+    hidden_button.get_attribute = AsyncMock(return_value=None)
+    hidden_button.bounding_box = AsyncMock(return_value=None)
+
+    visible_button = Mock()
+    visible_button.inner_text = AsyncMock(return_value="去支付")
+    visible_button.get_attribute = AsyncMock(return_value=None)
+    visible_button.bounding_box = AsyncMock(return_value={"x": 10, "y": 10, "width": 120, "height": 40})
+
+    mock_page = Mock()
+    mock_page.query_selector_all = AsyncMock(return_value=[hidden_button, visible_button])
+
+    page = BigModelPage(mock_page, Mock())
+
+    result = await page._find_visible_confirmation_button()
+
+    assert result is visible_button
+
+
+def test_payment_page_reached_detects_payment_hints():
+    """Payment-page text should count as the requested purchase-flow stop point."""
+    from bot.pages.bigmodel import BigModelPage
+
+    assert BigModelPage._payment_page_reached("订单已创建\n微信支付\n支付金额 ¥499") is True
 
 
 # Note: Full browser tests are not run by default as they require Playwright browsers

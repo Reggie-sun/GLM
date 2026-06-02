@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, Mock, patch
 from app.monitor.tasks import MonitorTask, TaskStatus, MonitorTaskRegistry
 from app.monitor.scheduler import MonitorScheduler
 from app.notifications import Notification, NotificationLevel, ConsoleNotificationChannel
-from app.api.v1.monitor import CreateMonitorTaskRequest, create_monitor_task
-from bot.pages.bigmodel import StockStatus, ProductInfo, BigModelPage
+from app.api.v1.monitor import CreateMonitorTaskRequest, create_monitor_task, trigger_purchase
+from bot.pages.bigmodel import StockStatus, ProductInfo
 
 
 def test_monitor_task_creation():
@@ -287,3 +287,47 @@ async def test_stock_change_notification_uses_console_and_webhook():
     assert notification.data["current_status"] == StockStatus.IN_STOCK.value
     mock_webhook_channel.assert_called_once_with("https://hooks.example.com/glm")
     webhook_channel.send.assert_awaited_once_with(notification)
+
+
+def test_account_response_reports_cookie_presence_without_leaking_value():
+    """Account API responses should show cookie readiness without exposing secrets."""
+    from app.api.v1.accounts import _account_to_response
+    from app.models import Account
+
+    db_account = Account(id=1, username="whdgfr07", status="active", is_public=False)
+    db_account.cookie = '[{"name":"bigmodel_token_production","value":"secret"}]'
+
+    response = _account_to_response(db_account)
+
+    assert response["has_cookie"] is True
+    assert "cookie" not in response
+
+
+@pytest.mark.asyncio
+async def test_trigger_purchase_returns_full_diagnostic_result():
+    """Manual trigger endpoint should not discard purchase diagnostics."""
+    task = MonitorTask(
+        task_id="trigger-diagnostics",
+        name="Trigger Diagnostics",
+        target_url="https://example.com",
+        check_interval=30,
+        auto_purchase=True,
+        account_id=1,
+    )
+
+    purchase_result = {
+        "success": False,
+        "message": "Purchase failed: high_demand_retry_exhausted",
+        "reason": "high_demand_retry_exhausted",
+        "attempts": 4,
+        "last_body_excerpt": "抢购人数过多，请刷新再试",
+    }
+
+    mock_scheduler = Mock()
+    mock_scheduler.get_task.return_value = task
+    mock_scheduler._attempt_purchase = AsyncMock(return_value=purchase_result)
+
+    with patch("app.api.v1.monitor.get_monitor_scheduler", return_value=mock_scheduler):
+        response = await trigger_purchase(task.task_id)
+
+    assert response == purchase_result

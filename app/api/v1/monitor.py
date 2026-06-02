@@ -1,11 +1,9 @@
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.monitor.scheduler import get_monitor_scheduler, MonitorScheduler
+from app.monitor.scheduler import get_monitor_scheduler
 from app.monitor.tasks import MonitorTask, TaskStatus, get_task_registry
-from app.notifications import get_notification_service, Notification, NotificationLevel
-from bot.pages.bigmodel import StockStatus
 
 router = APIRouter(tags=["monitor"])
 
@@ -147,7 +145,7 @@ async def delete_monitor_task(task_id: str):
     return SimpleResponse(success=True, message="Task deleted")
 
 
-@router.post("/tasks/{task_id}/trigger-purchase", response_model=SimpleResponse)
+@router.post("/tasks/{task_id}/trigger-purchase", response_model=Dict[str, Any])
 async def trigger_purchase(task_id: str):
     """Manually trigger purchase attempt"""
     scheduler = get_monitor_scheduler()
@@ -156,11 +154,7 @@ async def trigger_purchase(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    result = await scheduler._attempt_purchase(task)
-    success = result.get("success", False)
-    message = result.get("message", "Purchase attempted")
-
-    return SimpleResponse(success=success, message=message)
+    return await scheduler._attempt_purchase(task)
 
 
 @router.post("/tasks/{task_id}/check", response_model=Dict[str, Any])

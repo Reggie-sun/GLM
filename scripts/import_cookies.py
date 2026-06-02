@@ -2,9 +2,9 @@
 """
 Import cookies into database account
 """
-import sys
 import json
-import re
+import os
+import sys
 from pathlib import Path
 
 root = Path(__file__).parent.parent
@@ -12,6 +12,15 @@ sys.path.insert(0, str(root))
 
 from app.database import SessionLocal
 from app.models import Account
+
+
+USAGE = """Usage:
+  python import_cookies.py --stdin [account_id]
+  python import_cookies.py --env COOKIE_ENV_VAR [account_id]
+  python import_cookies.py '<cookie_string>' [account_id]
+
+Prefer --stdin or --env so sensitive cookies do not appear in shell history or process args.
+"""
 
 
 def parse_cookie_string(cookie_string: str) -> list:
@@ -35,6 +44,30 @@ def parse_cookie_string(cookie_string: str) -> list:
                 })
 
     return cookies
+
+
+def read_cookie_input(argv: list[str], stdin=sys.stdin, env=os.environ) -> tuple[str, int]:
+    """Read cookie input from stdin, env, or the legacy positional argument."""
+    if not argv:
+        raise ValueError(USAGE)
+
+    if argv[0] == "--stdin":
+        cookie_string = stdin.read().strip()
+        account_id = int(argv[1]) if len(argv) > 1 else 1
+    elif argv[0] == "--env":
+        if len(argv) < 2:
+            raise ValueError(USAGE)
+        env_var = argv[1]
+        cookie_string = env.get(env_var, "").strip()
+        account_id = int(argv[2]) if len(argv) > 2 else 1
+    else:
+        cookie_string = argv[0].strip()
+        account_id = int(argv[1]) if len(argv) > 1 else 1
+
+    if not cookie_string:
+        raise ValueError("Cookie string is empty")
+
+    return cookie_string, account_id
 
 
 def update_account_cookies(account_id: int, cookie_string: str):
@@ -82,14 +115,11 @@ def update_account_cookies(account_id: int, cookie_string: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python import_cookies.py <cookie_string> [account_id]")
-        print("\nExample:")
-        print("  python import_cookies.py 'cookie1=value1; cookie2=value2' 1")
+    try:
+        cookie_string, account_id = read_cookie_input(sys.argv[1:])
+    except ValueError as e:
+        print(e)
         sys.exit(1)
-
-    cookie_string = sys.argv[1]
-    account_id = int(sys.argv[2]) if len(sys.argv) > 2 else 1
 
     success = update_account_cookies(account_id, cookie_string)
     sys.exit(0 if success else 1)

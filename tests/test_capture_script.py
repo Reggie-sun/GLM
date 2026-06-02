@@ -1,5 +1,7 @@
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
+import pytest
 from app.services.purchase_capture import (
     ButtonSnapshot,
     CaptureEvent,
@@ -7,6 +9,7 @@ from app.services.purchase_capture import (
     build_replay_template,
     ensure_output_dir,
     extract_product_snapshot,
+    goto_dynamic_page,
     is_interesting_url,
     sanitize_headers,
     summarize_button_states,
@@ -139,3 +142,18 @@ def test_summarize_button_states_counts_only_enabled_visible_buttons():
     assert summary["total_count"] == 3
     assert summary["actionable_count"] == 1
     assert summary["texts"] == ["立即购买", "抢购人数过多，请刷新再试", "即刻订阅"]
+
+
+@pytest.mark.asyncio
+async def test_goto_dynamic_page_does_not_wait_for_networkidle():
+    page = Mock()
+    page.page = Mock()
+    page.page.goto = AsyncMock()
+
+    await goto_dynamic_page(page, "https://bigmodel.cn/glm-coding")
+
+    page.page.goto.assert_awaited_once_with(
+        "https://bigmodel.cn/glm-coding",
+        wait_until="domcontentloaded",
+        timeout=60000,
+    )

@@ -1,0 +1,53 @@
+{
+  "login_ok": true,
+  "url": "https://bigmodel.cn/glm-coding",
+  "raw_package_button_count": 6,
+  "package_buttons": [
+    {
+      "index": 0,
+      "text": "抢购人数过多，请刷新再试",
+      "class": "el-button el-tooltip buy-btn el-button--primary is-disabled disabled",
+      "enabled": false,
+      "visible": true
+    },
+    {
+      "index": 1,
+      "text": "抢购人数过多，请刷新再试",
+      "class": "el-button el-tooltip buy-btn el-button--primary is-disabled special disabled",
+      "enabled": false,
+      "visible": true
+    },
+    {
+      "index": 2,
+      "text": "抢购人数过多，请刷新再试",
+      "class": "el-button el-tooltip buy-btn el-button--primary is-disabled disabled",
+      "enabled": false,
+      "visible": true
+    },
+    {
+      "index": 3,
+      "text": "抢购人数过多，请刷新再试",
+      "class": "el-button el-tooltip buy-btn el-button--primary is-disabled disabled",
+      "enabled": false,
+      "visible": true
+    },
+    {
+      "index": 4,
+      "text": "抢购人数过多，请刷新再试",
+      "class": "el-button el-tooltip buy-btn el-button--primary is-disabled special disabled",
+      "enabled": false,
+      "visible": true
+    },
+    {
+      "index": 5,
+      "text": "抢购人数过多，请刷新再试",
+      "class": "el-button el-tooltip buy-btn el-button--primary is-disabled disabled",
+      "enabled": false,
+      "visible": true
+    }
+  ],
+  "clicked_package_button": null,
+  "clicked_confirm_button": null,
+  "event_count": 1,
+  "confirm_candidates": []
+}

@@ -15,8 +15,11 @@ from pathlib import Path
 root = Path(__file__).parent
 sys.path.insert(0, str(root))
 
-from bot.browser import BrowserManager, get_browser_manager
-from bot.pages.bigmodel import BigModelPage, create_bigmodel_page
+from bot.browser import get_browser_manager
+from bot.pages.bigmodel import create_bigmodel_page
+
+# This file is an interactive helper script, not a pytest test module.
+__test__ = False
 
 
 async def analyze_page():
@@ -91,7 +94,7 @@ async def check_stock():
         print("\n检查库存...")
         status, product = await page.check_stock()
 
-        print(f"\n结果:")
+        print("\n结果:")
         print(f"  商品名称: {product.name}")
         print(f"  价格: {product.price}")
         print(f"  库存状态: {status.value}")

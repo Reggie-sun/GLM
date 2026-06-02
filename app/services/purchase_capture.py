@@ -159,6 +159,11 @@ def _textual_content_type(content_type: str) -> bool:
     return any(content_type.startswith(prefix) for prefix in TEXTUAL_CONTENT_TYPES)
 
 
+async def goto_dynamic_page(page: BigModelPage, target_url: str, timeout: int = 60000) -> None:
+    """Navigate dynamic pages without waiting for long-lived analytics/network polling to go idle."""
+    await page.page.goto(target_url, wait_until="domcontentloaded", timeout=timeout)
+
+
 def try_parse_json(text: Optional[str]) -> Optional[Any]:
     if not text:
         return None
@@ -312,7 +317,7 @@ async def check_stock_with_account(
         if not login_ok:
             return StockStatus.UNKNOWN, {"error": "cookie_login_failed"}
 
-        await page.page.goto(target_url, wait_until="networkidle", timeout=120000)
+        await goto_dynamic_page(page, target_url)
         status, product_info = await page.check_stock()
         return status, {
             "product": product_info.name,
@@ -467,7 +472,7 @@ async def run_capture_session(
         if not login_ok:
             raise RuntimeError("Cookie login failed before capture")
 
-        await page.page.goto(target_url, wait_until="networkidle", timeout=120000)
+        await goto_dynamic_page(page, target_url)
 
         status, product_info = await page.check_stock()
         summary.stock_status = status.value

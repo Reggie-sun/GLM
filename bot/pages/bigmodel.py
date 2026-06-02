@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Any, Tuple
 from enum import Enum
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 class StockStatus(Enum):
     IN_STOCK = "in_stock"
+    HIGH_DEMAND = "high_demand"
     OUT_OF_STOCK = "out_of_stock"
     UNKNOWN = "unknown"
 
@@ -111,6 +112,10 @@ class BigModelPage:
             if actionable_package_buttons:
                 product_info.status = StockStatus.IN_STOCK
                 logger.info("Found actionable package subscribe button - In stock")
+
+            elif await self._has_high_demand_package_buttons(package_buttons, body_text):
+                product_info.status = StockStatus.HIGH_DEMAND
+                logger.info("Found crowded package purchase window - High demand")
 
             elif await self._has_blocked_package_buttons(package_buttons, body_text):
                 product_info.status = StockStatus.OUT_OF_STOCK
@@ -258,16 +263,29 @@ class BigModelPage:
 
                 await context.add_cookies([cookie_copy])
 
-            await self.page.reload()
+            await self.page.goto(self.BASE_URL, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(3)
-            logger.info("Cookies applied and page reloaded")
+            logger.info("Cookies applied and page navigated")
             return await self._is_logged_in()
 
         except Exception as e:
             logger.error(f"Cookie login error: {e}")
             return False
 
-    async def purchase(self, timeout: int = 30000) -> Tuple[bool, Optional[str]]:
+    async def purchase(
+        self,
+        timeout: int = 30000,
+        refresh_interval: float = 2.0,
+    ) -> Tuple[bool, Optional[str]]:
+        """Compatibility wrapper returning only success and order id."""
+        result = await self.purchase_detailed(timeout=timeout, refresh_interval=refresh_interval)
+        return result["success"], result.get("order_id")
+
+    async def purchase_detailed(
+        self,
+        timeout: int = 30000,
+        refresh_interval: float = 2.0,
+    ) -> dict[str, Any]:
         """
         Attempt to purchase - looks for buy buttons on GLM Coding page
 
@@ -277,57 +295,154 @@ class BigModelPage:
         - Any button that looks clickable and related to purchase
         """
         try:
+            deadline = asyncio.get_running_loop().time() + max(timeout, 0) / 1000
+            attempts = 0
+            last_result: dict[str, Any] = {
+                "success": False,
+                "order_id": None,
+                "reason": "not_started",
+                "attempts": 0,
+                "last_body_excerpt": "",
+            }
             await asyncio.sleep(2)
 
-            buy_buttons = await self._find_purchase_buttons()
-            buy_button = buy_buttons[0] if buy_buttons else None
+            while True:
+                buy_buttons = await self._find_purchase_buttons()
+                buy_button = buy_buttons[0] if buy_buttons else None
 
-            if buy_button:
-                logger.info("Clicking buy button...")
-                await buy_button.click()
-                await asyncio.sleep(3)
+                if buy_button:
+                    attempts += 1
+                    last_result = await self._complete_purchase(buy_button)
+                    last_result["attempts"] = attempts
+                    if last_result["success"]:
+                        return last_result
 
-                # Check for any confirmation popup
-                confirm_button = None
-                confirm_elements = await self.page.query_selector_all('button')
-                for elem in confirm_elements:
-                    try:
-                        text = (await elem.inner_text()).strip()
-                        if any(kw in text for kw in self.CONFIRM_KEYWORDS) and await self._element_is_enabled(elem):
-                            confirm_button = elem
-                            break
-                    except Exception:
-                        continue
+                    now = asyncio.get_running_loop().time()
+                    if now >= deadline:
+                        logger.warning("Purchase click did not complete before timeout")
+                        if last_result.get("reason") == "high_demand":
+                            last_result["reason"] = "high_demand_retry_exhausted"
+                        return last_result
 
-                if confirm_button:
-                    logger.info("Clicking confirmation button...")
-                    await confirm_button.click()
-                    await asyncio.sleep(3)
+                    logger.info("Purchase click did not complete, reloading page to retry")
+                    await self.page.reload()
+                    sleep_seconds = min(max(refresh_interval, 0), max(deadline - now, 0))
+                    if sleep_seconds:
+                        await asyncio.sleep(sleep_seconds)
+                    continue
 
-                # Check if purchase was successful
-                body_text = await self.page.inner_text('body')
-                success = any(kw in body_text for kw in ['成功', 'success', '订单', 'order'])
+                now = asyncio.get_running_loop().time()
+                if now >= deadline:
+                    logger.warning("Could not find any buy button before purchase timeout")
+                    return {
+                        "success": False,
+                        "order_id": None,
+                        "reason": "no_purchase_button",
+                        "attempts": attempts,
+                        "last_body_excerpt": await self._safe_body_excerpt(),
+                    }
 
-                order_id = None
-                # Try to find order number
-                if '订单' in body_text or 'order' in body_text.lower():
-                    lines = body_text.split('\n')
-                    for line in lines:
-                        if any(kw in line.lower() for kw in ['订单', 'order', '单号']):
-                            order_id = line.strip()
-                            break
-
-                return success, order_id
-
-            else:
-                logger.warning("Could not find any buy button - maybe still out of stock?")
-                return False, None
+                logger.info("No actionable buy button yet, reloading page to retry purchase")
+                await self.page.reload()
+                sleep_seconds = min(max(refresh_interval, 0), max(deadline - now, 0))
+                if sleep_seconds:
+                    await asyncio.sleep(sleep_seconds)
 
         except Exception as e:
             logger.error(f"Purchase error: {e}")
             import traceback
             traceback.print_exc()
-            return False, None
+            return {
+                "success": False,
+                "order_id": None,
+                "reason": "exception",
+                "attempts": 0,
+                "error": str(e),
+                "last_body_excerpt": "",
+            }
+
+    async def _complete_purchase(self, buy_button) -> dict[str, Any]:
+        """Click the purchase CTA and infer whether the order page succeeded."""
+        logger.info("Clicking buy button...")
+        await buy_button.click()
+        await asyncio.sleep(3)
+
+        confirm_button = await self._find_visible_confirmation_button()
+
+        if confirm_button:
+            logger.info("Clicking confirmation button...")
+            await confirm_button.click(timeout=5000)
+            await asyncio.sleep(3)
+
+        body_text = await self.page.inner_text('body')
+        success = any(kw in body_text for kw in ['成功', 'success', '订单', 'order']) or self._payment_page_reached(body_text)
+
+        order_id = None
+        if '订单' in body_text or 'order' in body_text.lower():
+            lines = body_text.split('\n')
+            for line in lines:
+                if any(kw in line.lower() for kw in ['订单', 'order', '单号']):
+                    order_id = line.strip()
+                    break
+
+        return {
+            "success": success,
+            "order_id": order_id,
+            "reason": self._purchase_failure_reason(body_text) if not success else self._purchase_success_reason(body_text),
+            "attempts": 1,
+            "last_body_excerpt": self._body_excerpt(body_text),
+        }
+
+    async def _find_visible_confirmation_button(self):
+        """Pick only a visible confirmation/payment-step button after the buy CTA."""
+        confirm_elements = await self.page.query_selector_all('button')
+        for elem in confirm_elements:
+            try:
+                text = (await elem.inner_text()).strip()
+            except Exception:
+                continue
+            if not any(kw in text for kw in self.CONFIRM_KEYWORDS):
+                continue
+            if not await self._element_is_visible(elem):
+                continue
+            if not await self._element_is_enabled(elem):
+                continue
+            return elem
+        return None
+
+    async def _safe_body_excerpt(self) -> str:
+        """Best-effort body excerpt for diagnostics without storing full page text."""
+        try:
+            return self._body_excerpt(await self.page.inner_text('body'))
+        except Exception:
+            return ""
+
+    def _purchase_failure_reason(self, body_text: str) -> str:
+        """Classify the most useful purchase failure reason from visible page text."""
+        if "抢购人数过多" in body_text or "刷新再试" in body_text:
+            return "high_demand"
+        if any(hint in body_text for hint in self.LOGGED_OUT_HINTS):
+            return "logged_out"
+        if "暂时售罄" in body_text or "售罄" in body_text:
+            return "sold_out"
+        return "unknown_after_click"
+
+    def _purchase_success_reason(self, body_text: str) -> str:
+        """Classify successful stop points in the purchase flow."""
+        if self._payment_page_reached(body_text):
+            return "payment_page_reached"
+        return "order_created"
+
+    @staticmethod
+    def _payment_page_reached(body_text: str) -> bool:
+        """Detect the order payment page without clicking any final payment provider action."""
+        payment_hints = ("支付金额", "支付方式", "微信支付", "支付宝", "付款", "二维码")
+        return any(hint in body_text for hint in payment_hints)
+
+    @staticmethod
+    def _body_excerpt(body_text: str, limit: int = 500) -> str:
+        """Keep diagnostics compact and avoid storing a full page dump."""
+        return " ".join(body_text.split())[:limit]
 
     async def _is_logged_in(self) -> bool:
         """Best-effort login verification after cookie or password login."""
@@ -398,8 +513,6 @@ class BigModelPage:
         """Detect sold-out or rate-limited package buttons on the live page."""
         if not elements:
             return False
-        if "抢购人数过多，请刷新再试" in body_text:
-            return True
 
         for element in elements:
             try:
@@ -411,6 +524,20 @@ class BigModelPage:
             if not await self._element_is_visible(element):
                 continue
             if not await self._element_is_enabled(element):
+                return True
+        return False
+
+    async def _has_high_demand_package_buttons(self, elements: list, body_text: str) -> bool:
+        """Detect the crowded-but-active purchase window shown by BigModel."""
+        if not elements or "抢购人数过多，请刷新再试" not in body_text:
+            return False
+
+        for element in elements:
+            try:
+                text = (await element.inner_text()).strip()
+            except Exception:
+                continue
+            if "抢购人数过多" in text and await self._element_is_visible(element):
                 return True
         return False
 
