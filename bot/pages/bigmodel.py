@@ -35,6 +35,7 @@ class ProductInfo:
 
 class BigModelPage:
     BASE_URL = "https://bigmodel.cn"
+    STOCK_SETTLE_SECONDS = 0.2
     BUY_KEYWORDS = (
         "购买",
         "立即购买",
@@ -93,8 +94,8 @@ class BigModelPage:
         - "05月11日 10:00 补货" - Restock time
         """
         try:
-            # Wait for page to load
-            await asyncio.sleep(3)
+            # Keep hot-window polling fast; navigation/reload already waits for DOM readiness.
+            await asyncio.sleep(self.STOCK_SETTLE_SECONDS)
 
             # Get page body text
             body_text = await self.page.inner_text('body')
@@ -285,6 +286,7 @@ class BigModelPage:
         self,
         timeout: int = 30000,
         refresh_interval: float = 2.0,
+        initial_buy_button=None,
     ) -> dict[str, Any]:
         """
         Attempt to purchase - looks for buy buttons on GLM Coding page
@@ -304,11 +306,13 @@ class BigModelPage:
                 "attempts": 0,
                 "last_body_excerpt": "",
             }
-            await asyncio.sleep(2)
 
             while True:
-                buy_buttons = await self._find_purchase_buttons()
-                buy_button = buy_buttons[0] if buy_buttons else None
+                buy_button = initial_buy_button
+                initial_buy_button = None
+                if buy_button is None:
+                    buy_buttons = await self._find_purchase_buttons()
+                    buy_button = buy_buttons[0] if buy_buttons else None
 
                 if buy_button:
                     attempts += 1
@@ -365,14 +369,14 @@ class BigModelPage:
         """Click the purchase CTA and infer whether the order page succeeded."""
         logger.info("Clicking buy button...")
         await buy_button.click()
-        await asyncio.sleep(3)
+        await asyncio.sleep(1)
 
         confirm_button = await self._find_visible_confirmation_button()
 
         if confirm_button:
             logger.info("Clicking confirmation button...")
             await confirm_button.click(timeout=5000)
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
 
         body_text = await self.page.inner_text('body')
         success = any(kw in body_text for kw in ['成功', 'success', '订单', 'order']) or self._payment_page_reached(body_text)
@@ -419,7 +423,12 @@ class BigModelPage:
 
     def _purchase_failure_reason(self, body_text: str) -> str:
         """Classify the most useful purchase failure reason from visible page text."""
-        if "抢购人数过多" in body_text or "刷新再试" in body_text:
+        if (
+            "抢购人数过多" in body_text
+            or "刷新再试" in body_text
+            or "购买人数较多" in body_text
+            or "稍后重试" in body_text
+        ):
             return "high_demand"
         if any(hint in body_text for hint in self.LOGGED_OUT_HINTS):
             return "logged_out"

@@ -68,6 +68,7 @@ async def build_result(
     stock_status: str,
     actionable_count: int,
     target_reached: bool,
+    actionable_buttons: list | None = None,
 ) -> dict[str, Any]:
     """Return a dry-run result or execute purchase when explicitly armed."""
     base = {
@@ -90,6 +91,7 @@ async def build_result(
     purchase_result = await page.purchase_detailed(
         timeout=purchase_timeout_ms,
         refresh_interval=refresh_interval,
+        initial_buy_button=actionable_buttons[0] if actionable_buttons else None,
     )
     return {**base, **purchase_result}
 
@@ -136,6 +138,56 @@ async def wait_for_login(page, timeout_seconds: int, poll_seconds: float = 2.0) 
     return False
 
 
+async def fast_reload(playwright_page, timeout_ms: int = 10000) -> None:
+    """Reload to a usable DOM without waiting for slower network-idle behavior."""
+    await playwright_page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
+
+
+async def fast_execute_probe(page, args: argparse.Namespace, target_at: datetime) -> dict[str, Any]:
+    """Hot path after target time: scan actionable package buttons before any slower stock parse."""
+    try:
+        await page.page.wait_for_selector(
+            ", ".join(page.PACKAGE_BUTTON_SELECTORS),
+            timeout=200,
+            state="attached",
+        )
+    except Exception:
+        pass
+
+    package_buttons = await page._find_elements(page.PACKAGE_BUTTON_SELECTORS)
+    actionable = await page._filter_purchase_buttons(package_buttons)
+    target_reached = current_time(args.timezone) >= target_at
+
+    status = "in_stock" if actionable else "unknown"
+    if not actionable and package_buttons:
+        button_texts = []
+        for button in package_buttons:
+            try:
+                button_texts.append((await button.inner_text()).strip())
+            except Exception:
+                continue
+        joined_text = " ".join(button_texts)
+        if "抢购人数过多" in joined_text or "刷新再试" in joined_text:
+            status = "high_demand"
+        elif "暂时售罄" in joined_text or "售罄" in joined_text:
+            status = "out_of_stock"
+
+    result = await build_result(
+        page=page,
+        execute=args.execute,
+        purchase_timeout_ms=args.purchase_timeout_ms,
+        refresh_interval=args.refresh_interval,
+        stock_status=status,
+        actionable_count=len(actionable),
+        target_reached=target_reached,
+        actionable_buttons=actionable,
+    )
+    result["restock_time"] = None
+    result["checked_at"] = current_time(args.timezone).isoformat()
+    result["current_url"] = page.page.url
+    return result
+
+
 async def run(args: argparse.Namespace) -> dict[str, Any]:
     target_at = parse_target_datetime(
         args.target_time,
@@ -173,21 +225,25 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         deadline = target_at + timedelta(seconds=args.run_seconds)
 
         while current_time(args.timezone) <= deadline:
-            status, product = await page.check_stock()
-            package_buttons = await page._find_elements(page.PACKAGE_BUTTON_SELECTORS)
-            actionable = await page._filter_purchase_buttons(package_buttons)
-            final_result = await build_result(
-                page=page,
-                execute=args.execute,
-                purchase_timeout_ms=args.purchase_timeout_ms,
-                refresh_interval=args.refresh_interval,
-                stock_status=status.value,
-                actionable_count=len(actionable),
-                target_reached=current_time(args.timezone) >= target_at,
-            )
-            final_result["restock_time"] = product.restock_time
-            final_result["checked_at"] = current_time(args.timezone).isoformat()
-            final_result["current_url"] = page.page.url
+            if args.execute and current_time(args.timezone) >= target_at:
+                final_result = await fast_execute_probe(page, args, target_at)
+            else:
+                status, product = await page.check_stock()
+                package_buttons = await page._find_elements(page.PACKAGE_BUTTON_SELECTORS)
+                actionable = await page._filter_purchase_buttons(package_buttons)
+                final_result = await build_result(
+                    page=page,
+                    execute=args.execute,
+                    purchase_timeout_ms=args.purchase_timeout_ms,
+                    refresh_interval=args.refresh_interval,
+                    stock_status=status.value,
+                    actionable_count=len(actionable),
+                    target_reached=current_time(args.timezone) >= target_at,
+                    actionable_buttons=actionable,
+                )
+                final_result["restock_time"] = product.restock_time
+                final_result["checked_at"] = current_time(args.timezone).isoformat()
+                final_result["current_url"] = page.page.url
             print(json.dumps(final_result, ensure_ascii=False))
 
             if args.execute and final_result.get("target_reached") and final_result.get("attempts", 0) > 0:
@@ -222,7 +278,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                         await asyncio.sleep(args.keep_open_seconds)
                 return final_result
 
-            await page.page.reload(wait_until="domcontentloaded", timeout=30000)
+            await fast_reload(page.page)
             await asyncio.sleep(max(args.refresh_interval, 0))
 
         return {**final_result, "reason": final_result.get("reason", "prewarm_window_ended")}

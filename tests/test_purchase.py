@@ -6,7 +6,7 @@ from datetime import datetime
 from app.monitor.scheduler import MonitorScheduler
 from app.monitor.tasks import MonitorTask, TaskStatus
 from app.models.account import Account
-from bot.pages.bigmodel import StockStatus, ProductInfo
+from bot.pages.bigmodel import BigModelPage, StockStatus, ProductInfo
 
 
 @pytest.mark.asyncio
@@ -360,3 +360,34 @@ async def test_execute_purchase_flow_returns_detailed_failure_reason():
     assert result["attempts"] == 3
     assert "抢购人数过多" in result["last_body_excerpt"]
     mock_page.purchase_detailed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_purchase_detailed_clicks_initial_button_without_rescan():
+    """A short-lived detected CTA should be clicked directly before any rescan/reload."""
+    page = Mock()
+    bigmodel_page = BigModelPage(page)
+    button = Mock()
+
+    bigmodel_page._complete_purchase = AsyncMock(
+        return_value={
+            "success": True,
+            "order_id": None,
+            "reason": "payment_page_reached",
+            "attempts": 1,
+            "last_body_excerpt": "支付方式",
+        }
+    )
+    bigmodel_page._find_purchase_buttons = AsyncMock()
+
+    result = await bigmodel_page.purchase_detailed(
+        timeout=20000,
+        refresh_interval=1,
+        initial_buy_button=button,
+    )
+
+    assert result["success"] is True
+    assert result["reason"] == "payment_page_reached"
+    assert result["attempts"] == 1
+    bigmodel_page._complete_purchase.assert_awaited_once_with(button)
+    bigmodel_page._find_purchase_buttons.assert_not_awaited()

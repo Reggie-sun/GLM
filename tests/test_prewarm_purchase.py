@@ -74,6 +74,7 @@ async def test_build_result_dry_run_does_not_purchase_when_actionable():
 @pytest.mark.asyncio
 async def test_build_result_execute_purchases_when_actionable_and_target_reached():
     page = Mock()
+    button = Mock()
     page.purchase_detailed = AsyncMock(
         return_value={"success": True, "reason": "order_created", "attempts": 1}
     )
@@ -86,8 +87,13 @@ async def test_build_result_execute_purchases_when_actionable_and_target_reached
         stock_status="in_stock",
         actionable_count=1,
         target_reached=True,
+        actionable_buttons=[button],
     )
 
     assert result["success"] is True
     assert result["reason"] == "order_created"
-    page.purchase_detailed.assert_awaited_once()
+    page.purchase_detailed.assert_awaited_once_with(
+        timeout=30000,
+        refresh_interval=2.0,
+        initial_buy_button=button,
+    )
