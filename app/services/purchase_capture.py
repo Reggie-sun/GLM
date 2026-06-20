@@ -47,6 +47,11 @@ REPLAY_HEADER_PLACEHOLDERS = {
     "bigmodel-organization": "<paste bigmodel-organization header from browser>",
     "bigmodel-project": "<paste bigmodel-project header from browser>",
 }
+LIVE_AUTH_HEADER_NAMES = (
+    "authorization",
+    "bigmodel-organization",
+    "bigmodel-project",
+)
 PURCHASE_CANDIDATE_SORT_ORDER = {
     "order_creation": 0,
     "payment_signature": 1,
@@ -57,6 +62,148 @@ PURCHASE_CANDIDATE_SORT_ORDER = {
     "account": 6,
     "order_signal": 7,
 }
+KNOWN_PURCHASE_API_CATALOG = (
+    {
+        "id": "batch-preview",
+        "name": "Probe Stock",
+        "method": "POST",
+        "path": "/api/biz/pay/batch-preview",
+        "role": "Probe",
+        "safe_to_execute": True,
+        "body_template": {"invitationCode": ""},
+        "description": "Read-only stock and product probe used by the live page.",
+    },
+    {
+        "id": "subscription-detail",
+        "name": "User Subscription State",
+        "method": "GET",
+        "path": "/api/biz/subscription/enterprise/v2/subscription/detail",
+        "role": "Route",
+        "safe_to_execute": True,
+        "body_template": None,
+        "description": "Returns route-relevant subscription state for the current account.",
+    },
+    {
+        "id": "comeback-check",
+        "name": "Comeback Route Check",
+        "method": "GET",
+        "path": "/api/biz/pay/comeback/check",
+        "role": "Route",
+        "safe_to_execute": True,
+        "body_template": None,
+        "description": "Checks whether the account should use the comeback purchase path.",
+    },
+    {
+        "id": "getCustomerInfo",
+        "name": "Customer Profile",
+        "method": "GET",
+        "path": "/api/biz/customer/getCustomerInfo",
+        "role": "Informational",
+        "safe_to_execute": True,
+        "body_template": None,
+        "description": "Returns the current customer profile and login-linked identifiers.",
+    },
+    {
+        "id": "subscription-list",
+        "name": "Subscription List",
+        "method": "GET",
+        "path": "/api/biz/subscription/list",
+        "role": "Informational",
+        "safe_to_execute": True,
+        "body_template": None,
+        "description": "Lists current subscriptions and plan details.",
+    },
+    {
+        "id": "productIdInfo",
+        "name": "Product ID Mapping",
+        "method": "GET",
+        "path": "/api/biz/tokenResPack/productIdInfo",
+        "role": "Informational",
+        "safe_to_execute": True,
+        "body_template": None,
+        "description": "Maps product names or tiers to product IDs.",
+    },
+    {
+        "id": "preview",
+        "name": "Reserve Stock",
+        "method": "POST",
+        "path": "/api/biz/pay/preview",
+        "role": "Reserve",
+        "safe_to_execute": False,
+        "body_template": {
+            "productId": "<productId>",
+            "invitationCode": "",
+            "ticket": "<captcha_ticket>",
+            "randstr": "<captcha_randstr>",
+        },
+        "description": "First mutating purchase step. Requires a valid Tencent captcha ticket.",
+    },
+    {
+        "id": "comeback-preview",
+        "name": "Reserve Stock (Comeback)",
+        "method": "POST",
+        "path": "/api/biz/pay/comeback/preview",
+        "role": "Reserve",
+        "safe_to_execute": False,
+        "body_template": {
+            "productId": "<targetProductId>",
+            "invitationCode": "",
+            "ticket": "<captcha_ticket>",
+            "randstr": "<captcha_randstr>",
+        },
+        "description": "Comeback variant of preview for existing or lapsed subscribers.",
+    },
+    {
+        "id": "create-sign",
+        "name": "Commit Payment",
+        "method": "POST",
+        "path": "/api/biz/pay/create-sign",
+        "role": "Commit",
+        "safe_to_execute": False,
+        "body_template": {
+            "productId": "<productId>",
+            "customerId": "<customerId>",
+            "bizId": "<bizId>",
+            "payType": "ALI",
+            "invitationCode": "",
+        },
+        "description": "Consumes the preview bizId and returns payment sign or order data.",
+    },
+    {
+        "id": "product-update-sign",
+        "name": "Commit Payment (Upgrade)",
+        "method": "POST",
+        "path": "/api/biz/pay/product/update/sign",
+        "role": "Commit",
+        "safe_to_execute": False,
+        "body_template": {
+            "oldProductId": "<oldProductId>",
+            "newProductId": "<newProductId>",
+            "customerId": "<customerId>",
+            "agreementNo": "<agreementNo>",
+            "bizId": "<bizId>",
+        },
+        "description": "Upgrade or renewal variant of create-sign.",
+    },
+    {
+        "id": "check",
+        "name": "Poll Payment Status",
+        "method": "GET",
+        "path": "/api/biz/pay/check?bizId=<bizId>",
+        "role": "Poll",
+        "safe_to_execute": False,
+        "body_template": None,
+        "description": "Polls payment state after create-sign using the generated bizId.",
+    },
+)
+DEFAULT_SAFE_PROBE_IDS = (
+    "batch-preview",
+    "getCustomerInfo",
+    "productIdInfo",
+    "subscription-detail",
+    "subscription-list",
+    "comeback-check",
+)
 
 
 @dataclass
@@ -141,6 +288,22 @@ class EndpointSummary:
     response_success: Optional[bool]
     response_message: Optional[str]
     response_data_keys: list[str]
+
+
+@dataclass
+class SameOriginProbeResult:
+    endpoint_id: str
+    method: str
+    path: str
+    url: str
+    page_url: Optional[str]
+    status: int
+    duration_ms: int
+    request_headers: dict[str, str]
+    request_body: Optional[Any]
+    response_headers: dict[str, str]
+    response_body: Optional[Any]
+    error: Optional[str]
 
 
 def sanitize_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -358,7 +521,133 @@ def build_purchase_candidate_summaries(events: list[CaptureEvent]) -> list[dict[
     )
 
 
-def write_capture_artifacts(output_dir: Path, events: list[CaptureEvent]) -> None:
+def get_purchase_api_catalog() -> list[dict[str, Any]]:
+    return [dict(endpoint) for endpoint in KNOWN_PURCHASE_API_CATALOG]
+
+
+def select_safe_probe_definitions(endpoint_ids: Optional[list[str]] = None) -> list[dict[str, Any]]:
+    selected_ids = endpoint_ids or list(DEFAULT_SAFE_PROBE_IDS)
+    selected: list[dict[str, Any]] = []
+
+    for endpoint_id in selected_ids:
+        endpoint = next(
+            (item for item in KNOWN_PURCHASE_API_CATALOG if item["id"] == endpoint_id),
+            None,
+        )
+        if endpoint is None:
+            raise ValueError(f"Unknown probe endpoint id: {endpoint_id}")
+        if not endpoint["safe_to_execute"]:
+            raise ValueError(
+                f"Endpoint {endpoint_id} is not marked safe for automatic same-origin probing"
+            )
+        selected.append(dict(endpoint))
+
+    return selected
+
+
+async def probe_endpoint_via_page(
+    page: BigModelPage,
+    *,
+    auth_headers: dict[str, str],
+    endpoint: dict[str, Any],
+) -> SameOriginProbeResult:
+    headers = {
+        "Content-Type": "application/json;charset=UTF-8",
+        "Authorization": auth_headers["authorization"],
+        "bigmodel-organization": auth_headers["bigmodel-organization"],
+        "bigmodel-project": auth_headers["bigmodel-project"],
+    }
+    request_body = endpoint["body_template"]
+    response = await page.page.evaluate(
+        """async (payload) => {
+            const started = performance.now();
+            const url = payload.path.startsWith("http")
+              ? payload.path
+              : `${payload.baseUrl}${payload.path}`;
+
+            try {
+              const response = await fetch(url, {
+                method: payload.method,
+                headers: payload.headers,
+                body: payload.body === null ? undefined : JSON.stringify(payload.body),
+                credentials: "include",
+                cache: "no-store",
+              });
+              const responseHeaders = {};
+              response.headers.forEach((value, key) => {
+                responseHeaders[key] = value;
+              });
+              const bodyText = await response.text();
+              return {
+                url,
+                status: response.status,
+                responseHeaders,
+                bodyText,
+                durationMs: Math.round(performance.now() - started),
+              };
+            } catch (error) {
+              return {
+                url,
+                status: 0,
+                responseHeaders: {},
+                bodyText: null,
+                durationMs: Math.round(performance.now() - started),
+                error: String(error),
+              };
+            }
+        }""",
+        {
+            "baseUrl": BigModelPage.BASE_URL,
+            "path": endpoint["path"],
+            "method": endpoint["method"],
+            "headers": headers,
+            "body": request_body,
+        },
+    )
+    return SameOriginProbeResult(
+        endpoint_id=endpoint["id"],
+        method=endpoint["method"],
+        path=endpoint["path"],
+        url=response["url"],
+        page_url=page.page.url,
+        status=response["status"],
+        duration_ms=response["durationMs"],
+        request_headers=sanitize_headers(headers),
+        request_body=request_body,
+        response_headers=sanitize_headers(response["responseHeaders"]),
+        response_body=try_parse_json(response["bodyText"]) if response["bodyText"] else response["bodyText"],
+        error=response.get("error"),
+    )
+
+
+async def run_same_origin_probes(
+    page: BigModelPage,
+    recorder: "PurchaseFlowRecorder",
+    *,
+    endpoint_ids: Optional[list[str]] = None,
+) -> list[SameOriginProbeResult]:
+    probe_definitions = select_safe_probe_definitions(endpoint_ids)
+    auth_headers = recorder.get_live_auth_headers()
+    if auth_headers is None:
+        return []
+
+    results: list[SameOriginProbeResult] = []
+    for endpoint in probe_definitions:
+        results.append(
+            await probe_endpoint_via_page(
+                page,
+                auth_headers=auth_headers,
+                endpoint=endpoint,
+            )
+        )
+    return results
+
+
+def write_capture_artifacts(
+    output_dir: Path,
+    events: list[CaptureEvent],
+    same_origin_probe_results: Optional[list[SameOriginProbeResult]] = None,
+) -> None:
     endpoint_summaries = [asdict(build_endpoint_summary(event)) for event in events]
     _serialize_json(output_dir / "endpoint_summary.json", {"events": endpoint_summaries})
 
@@ -380,6 +669,14 @@ def write_capture_artifacts(output_dir: Path, events: list[CaptureEvent]) -> Non
     _serialize_json(
         output_dir / "purchase_candidates.json",
         {"candidates": build_purchase_candidate_summaries(events)},
+    )
+    _serialize_json(
+        output_dir / "purchase_api_catalog.json",
+        {"endpoints": get_purchase_api_catalog()},
+    )
+    _serialize_json(
+        output_dir / "same_origin_probe_results.json",
+        {"results": [asdict(result) for result in (same_origin_probe_results or [])]},
     )
 
 
@@ -453,6 +750,7 @@ class PurchaseFlowRecorder:
         self.captured_events: list[CaptureEvent] = []
         self.phase = "page_load"
         self.page: Optional[BigModelPage] = None
+        self._live_auth_headers: dict[str, str] = {}
 
     def attach(self, page: BigModelPage) -> None:
         self.page = page
@@ -460,6 +758,17 @@ class PurchaseFlowRecorder:
 
     def set_phase(self, phase: str) -> None:
         self.phase = phase
+
+    def get_live_auth_headers(self) -> Optional[dict[str, str]]:
+        if all(self._live_auth_headers.get(name) for name in LIVE_AUTH_HEADER_NAMES):
+            return dict(self._live_auth_headers)
+        return None
+
+    def _remember_live_auth_headers(self, headers: dict[str, str]) -> None:
+        for name in LIVE_AUTH_HEADER_NAMES:
+            value = headers.get(name)
+            if value:
+                self._live_auth_headers[name] = value
 
     def _schedule_response_capture(self, response: Response) -> None:
         if not is_interesting_url(response.url):
@@ -470,7 +779,9 @@ class PurchaseFlowRecorder:
 
     async def _capture_response(self, response: Response) -> None:
         request = response.request
-        request_headers = sanitize_headers(await request.all_headers())
+        raw_request_headers = await request.all_headers()
+        self._remember_live_auth_headers(raw_request_headers)
+        request_headers = sanitize_headers(raw_request_headers)
         response_headers = sanitize_headers(await response.all_headers())
         content_type = response_headers.get("content-type", "")
         if _textual_content_type(content_type):
@@ -572,6 +883,8 @@ async def run_capture_session(
     output_dir: Path,
     headless: bool,
     click_hero: bool,
+    same_origin_probe: bool,
+    probe_endpoint_ids: Optional[list[str]],
     settle_seconds: int,
     hold_seconds: int,
 ) -> CaptureSummary:
@@ -590,6 +903,7 @@ async def run_capture_session(
         output_dir=str(output_dir),
         event_count=0,
     )
+    same_origin_probe_results: list[SameOriginProbeResult] = []
 
     try:
         context = await browser_manager.create_context(user_agent=account.user_agent)
@@ -631,7 +945,17 @@ async def run_capture_session(
             await asyncio.sleep(hold_seconds)
 
         await recorder.flush()
-        write_capture_artifacts(output_dir, recorder.captured_events)
+        if same_origin_probe:
+            same_origin_probe_results = await run_same_origin_probes(
+                page,
+                recorder,
+                endpoint_ids=probe_endpoint_ids,
+            )
+        write_capture_artifacts(
+            output_dir,
+            recorder.captured_events,
+            same_origin_probe_results=same_origin_probe_results,
+        )
         summary.event_count = recorder.event_count
         return summary
     finally:
@@ -655,6 +979,8 @@ async def watch_capture_session(
     click_package_on_actionable: bool,
     attempt_purchase_on_actionable: bool,
     purchase_timeout_ms: int,
+    same_origin_probe: bool,
+    probe_endpoint_ids: Optional[list[str]],
     settle_seconds: int,
 ) -> WatchSummary:
     account, cookies = load_account_with_cookies(account_id)
@@ -679,6 +1005,7 @@ async def watch_capture_session(
         final_stock_status=None,
         purchase_result=None,
     )
+    same_origin_probe_results: list[SameOriginProbeResult] = []
 
     try:
         context = await browser_manager.create_context(user_agent=account.user_agent)
@@ -758,7 +1085,17 @@ async def watch_capture_session(
             await asyncio.sleep(refresh_interval)
 
         await recorder.flush()
-        write_capture_artifacts(output_dir, recorder.captured_events)
+        if same_origin_probe:
+            same_origin_probe_results = await run_same_origin_probes(
+                page,
+                recorder,
+                endpoint_ids=probe_endpoint_ids,
+            )
+        write_capture_artifacts(
+            output_dir,
+            recorder.captured_events,
+            same_origin_probe_results=same_origin_probe_results,
+        )
         summary.event_count = recorder.event_count
         await page.page.screenshot(path=str(output_dir / "watch_final.png"), full_page=False)
         return summary

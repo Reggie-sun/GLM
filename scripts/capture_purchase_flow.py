@@ -69,6 +69,17 @@ def parse_args() -> argparse.Namespace:
         help="Do not click the hero subscribe CTA automatically",
     )
     parser.add_argument(
+        "--same-origin-probe",
+        action="store_true",
+        help="After capture, run safe same-origin API probes inside the live bigmodel.cn page using the browser session's auth headers",
+    )
+    parser.add_argument(
+        "--probe-endpoint",
+        action="append",
+        default=[],
+        help="Limit same-origin probes to specific safe endpoint ids such as batch-preview or getCustomerInfo; can be repeated",
+    )
+    parser.add_argument(
         "--settle-seconds",
         type=int,
         default=5,
@@ -119,6 +130,7 @@ def parse_args() -> argparse.Namespace:
 async def main() -> int:
     args = parse_args()
     output_dir = ensure_output_dir(Path(args.output_dir))
+    probe_endpoint_ids = args.probe_endpoint or None
 
     print("=" * 70)
     print("GLM Coding Purchase Flow Capture")
@@ -153,6 +165,8 @@ async def main() -> int:
             click_package_on_actionable=args.click_package_on_actionable,
             attempt_purchase_on_actionable=args.attempt_purchase_on_actionable,
             purchase_timeout_ms=args.purchase_timeout_ms,
+            same_origin_probe=args.same_origin_probe,
+            probe_endpoint_ids=probe_endpoint_ids,
             settle_seconds=args.settle_seconds,
         )
         print("\nWatch capture complete")
@@ -178,6 +192,8 @@ async def main() -> int:
             output_dir=output_dir,
             headless=not args.headed,
             click_hero=not args.skip_hero_click,
+            same_origin_probe=args.same_origin_probe,
+            probe_endpoint_ids=probe_endpoint_ids,
             settle_seconds=args.settle_seconds,
             hold_seconds=args.hold_seconds,
         )
@@ -191,6 +207,8 @@ async def main() -> int:
     print(f"Events: {output_dir / 'events.jsonl'}")
     print(f"Endpoint summary: {output_dir / 'endpoint_summary.json'}")
     print(f"Purchase candidates: {output_dir / 'purchase_candidates.json'}")
+    print(f"Purchase API catalog: {output_dir / 'purchase_api_catalog.json'}")
+    print(f"Same-origin probes: {output_dir / 'same_origin_probe_results.json'}")
     print(f"Replay templates: {output_dir / 'replay_templates.json'}")
     print(f"Batch preview products: {output_dir / 'batch_preview_products.json'}")
     return 0

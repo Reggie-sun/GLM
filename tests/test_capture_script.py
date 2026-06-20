@@ -11,9 +11,12 @@ from app.services.purchase_capture import (
     build_replay_template,
     ensure_output_dir,
     extract_product_snapshot,
+    get_purchase_api_catalog,
     goto_dynamic_page,
     is_interesting_url,
+    probe_endpoint_via_page,
     sanitize_headers,
+    select_safe_probe_definitions,
     summarize_button_states,
 )
 
@@ -179,6 +182,67 @@ def test_build_purchase_candidate_summaries_groups_by_endpoint_and_phase():
     assert candidates[0]["response_data_keys"] == ["orderId", "payUrl"]
     assert candidates[1]["phases"] == ["hero_click"]
     assert candidates[1]["request_body"] == {"invitationCode": ""}
+
+
+def test_select_safe_probe_definitions_uses_default_safe_catalog():
+    selected = select_safe_probe_definitions()
+
+    assert [item["id"] for item in selected] == [
+        "batch-preview",
+        "getCustomerInfo",
+        "productIdInfo",
+        "subscription-detail",
+        "subscription-list",
+        "comeback-check",
+    ]
+    assert all(item["safe_to_execute"] is True for item in selected)
+
+
+def test_purchase_api_catalog_keeps_mutating_templates_but_marks_them_unsafe():
+    catalog = get_purchase_api_catalog()
+    preview = next(item for item in catalog if item["id"] == "preview")
+    create_sign = next(item for item in catalog if item["id"] == "create-sign")
+
+    assert preview["safe_to_execute"] is False
+    assert preview["body_template"]["ticket"] == "<captcha_ticket>"
+    assert create_sign["body_template"]["bizId"] == "<bizId>"
+
+
+@pytest.mark.asyncio
+async def test_probe_endpoint_via_page_runs_same_origin_fetch_with_live_headers():
+    mock_page = Mock()
+    mock_page.page = Mock()
+    mock_page.page.url = "https://bigmodel.cn/glm-coding"
+    mock_page.page.evaluate = AsyncMock(
+        return_value={
+            "url": "https://bigmodel.cn/api/biz/customer/getCustomerInfo",
+            "status": 200,
+            "responseHeaders": {"content-type": "application/json"},
+            "bodyText": '{"code":200,"msg":"ok","data":{"id":"cust-1"}}',
+            "durationMs": 88,
+        }
+    )
+
+    result = await probe_endpoint_via_page(
+        mock_page,
+        auth_headers={
+            "authorization": "Bearer test-token",
+            "bigmodel-organization": "org-1",
+            "bigmodel-project": "proj-1",
+        },
+        endpoint={
+            "id": "getCustomerInfo",
+            "method": "GET",
+            "path": "/api/biz/customer/getCustomerInfo",
+            "body_template": None,
+        },
+    )
+
+    assert result.endpoint_id == "getCustomerInfo"
+    assert result.status == 200
+    assert result.response_body["data"]["id"] == "cust-1"
+    assert result.request_headers["Authorization"] == "<redacted>"
+    mock_page.page.evaluate.assert_awaited_once()
 
 
 def test_summarize_button_states_counts_only_enabled_visible_buttons():
