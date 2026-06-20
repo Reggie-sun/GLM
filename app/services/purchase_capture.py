@@ -26,7 +26,10 @@ SENSITIVE_HEADER_NAMES = {
 INTERESTING_URL_PARTS = (
     "/api/biz/pay/",
     "/api/pay/",
+    "/pay/bank/",
+    "/api/biz/customer/",
     "/api/biz/tokenaccounts/",
+    "/api/biz/tokenrespack/",
     "/api/biz/tokenpurchaserecords/",
     "/api/biz/product/",
     "/subscribe-pay",
@@ -44,14 +47,27 @@ REPLAY_HEADER_PLACEHOLDERS = {
     "bigmodel-organization": "<paste bigmodel-organization header from browser>",
     "bigmodel-project": "<paste bigmodel-project header from browser>",
 }
+PURCHASE_CANDIDATE_SORT_ORDER = {
+    "order_creation": 0,
+    "payment_signature": 1,
+    "pre_order": 2,
+    "payment_page": 3,
+    "preview": 4,
+    "product_lookup": 5,
+    "account": 6,
+    "order_signal": 7,
+}
 
 
 @dataclass
 class CaptureEvent:
     timestamp: str
+    phase: str
     method: str
     url: str
     status: int
+    page_url: Optional[str]
+    resource_type: Optional[str]
     request_headers: dict[str, str]
     response_headers: dict[str, str]
     request_body: Optional[str]
@@ -104,16 +120,21 @@ class WatchSummary:
     actionable_detected: bool
     package_click_attempted: bool
     package_click_triggered: bool
+    purchase_attempt_triggered: bool
     first_actionable_at: Optional[str]
     event_count: int
     final_stock_status: Optional[str]
+    purchase_result: Optional[dict[str, Any]]
 
 
 @dataclass
 class EndpointSummary:
+    phase: str
     method: str
     url: str
     status: int
+    page_url: Optional[str]
+    resource_type: Optional[str]
     request_header_names: list[str]
     request_body: Optional[Any]
     response_code: Optional[int]
@@ -211,9 +232,12 @@ def build_endpoint_summary(event: CaptureEvent) -> EndpointSummary:
     response_data = response_json.get("data") if isinstance(response_json, dict) else None
     response_data_keys = sorted(response_data.keys()) if isinstance(response_data, dict) else []
     return EndpointSummary(
+        phase=event.phase,
         method=event.method,
         url=event.url,
         status=event.status,
+        page_url=event.page_url,
+        resource_type=event.resource_type,
         request_header_names=sorted(event.request_headers.keys()),
         request_body=request_body,
         response_code=response_json.get("code") if isinstance(response_json, dict) else None,
@@ -239,6 +263,8 @@ def build_replay_template(event: CaptureEvent) -> dict[str, Any]:
     return {
         "method": event.method,
         "url": event.url,
+        "phase": event.phase,
+        "page_url": event.page_url,
         "headers": headers_template,
         "body": try_parse_json(event.request_body) if event.request_body else None,
         "notes": [
@@ -246,6 +272,90 @@ def build_replay_template(event: CaptureEvent) -> dict[str, Any]:
             "This template is generated from a captured request with sensitive values removed.",
         ],
     }
+
+
+def classify_purchase_candidate(summary: EndpointSummary) -> Optional[tuple[str, str]]:
+    path = urlparse(summary.url).path.lower()
+    response_keys = {key.lower() for key in summary.response_data_keys}
+
+    if path.endswith("/api/biz/pay/batch-preview") or path.endswith("/api/biz/pay/preview"):
+        return "preview", "price or product preview endpoint"
+    if "create-sign" in path:
+        return "payment_signature", "payment signature creation endpoint"
+    if "createpreorder" in path:
+        return "pre_order", "pre-order creation endpoint"
+    if "createbankorder" in path or "/finance/order" in path or "/finance/pay" in path or "/pay/bank/" in path:
+        return "order_creation", "order creation or payment initiation endpoint"
+    if "/subscribe-pay" in path:
+        return "payment_page", "subscribe payment page transition"
+    if "/api/biz/customer/" in path:
+        return "account", "customer identity or login-state endpoint"
+    if "/api/biz/tokenrespack/" in path or "/api/biz/tokenaccounts/" in path:
+        return "product_lookup", "product lookup or purchase-limit endpoint"
+    if {"orderid", "orderno", "payurl", "paylink", "preorderid", "sign", "bizid"} & response_keys:
+        return "order_signal", "response payload contains order or payment keys"
+    return None
+
+
+def build_purchase_candidate_summaries(events: list[CaptureEvent]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    for event in events:
+        summary = build_endpoint_summary(event)
+        classified = classify_purchase_candidate(summary)
+        if classified is None:
+            continue
+
+        category, reason = classified
+        key = (category, summary.method, summary.url)
+        candidate = grouped.get(key)
+        if candidate is None:
+            candidate = {
+                "category": category,
+                "reason": reason,
+                "method": summary.method,
+                "url": summary.url,
+                "occurrences": 0,
+                "phases": [],
+                "page_urls": [],
+                "resource_types": [],
+                "request_body": summary.request_body,
+                "response_code": summary.response_code,
+                "response_success": summary.response_success,
+                "response_message": summary.response_message,
+                "response_data_keys": summary.response_data_keys,
+                "http_statuses": [],
+            }
+            grouped[key] = candidate
+
+        candidate["occurrences"] += 1
+        if summary.phase not in candidate["phases"]:
+            candidate["phases"].append(summary.phase)
+        if summary.page_url and summary.page_url not in candidate["page_urls"]:
+            candidate["page_urls"].append(summary.page_url)
+        if summary.resource_type and summary.resource_type not in candidate["resource_types"]:
+            candidate["resource_types"].append(summary.resource_type)
+        if summary.status not in candidate["http_statuses"]:
+            candidate["http_statuses"].append(summary.status)
+
+        if candidate["request_body"] is None and summary.request_body is not None:
+            candidate["request_body"] = summary.request_body
+        if candidate["response_code"] is None and summary.response_code is not None:
+            candidate["response_code"] = summary.response_code
+        if candidate["response_success"] is None and summary.response_success is not None:
+            candidate["response_success"] = summary.response_success
+        if candidate["response_message"] is None and summary.response_message is not None:
+            candidate["response_message"] = summary.response_message
+        if not candidate["response_data_keys"] and summary.response_data_keys:
+            candidate["response_data_keys"] = summary.response_data_keys
+
+    return sorted(
+        grouped.values(),
+        key=lambda item: (
+            PURCHASE_CANDIDATE_SORT_ORDER.get(item["category"], 99),
+            item["url"],
+        ),
+    )
 
 
 def write_capture_artifacts(output_dir: Path, events: list[CaptureEvent]) -> None:
@@ -267,6 +377,10 @@ def write_capture_artifacts(output_dir: Path, events: list[CaptureEvent]) -> Non
 
     _serialize_json(output_dir / "replay_templates.json", replay_templates)
     _serialize_json(output_dir / "batch_preview_products.json", {"products": batch_preview_products})
+    _serialize_json(
+        output_dir / "purchase_candidates.json",
+        {"candidates": build_purchase_candidate_summaries(events)},
+    )
 
 
 def summarize_button_states(buttons: list[ButtonSnapshot]) -> dict[str, Any]:
@@ -337,9 +451,15 @@ class PurchaseFlowRecorder:
         self.pending_tasks: set[asyncio.Task] = set()
         self.event_count = 0
         self.captured_events: list[CaptureEvent] = []
+        self.phase = "page_load"
+        self.page: Optional[BigModelPage] = None
 
     def attach(self, page: BigModelPage) -> None:
+        self.page = page
         page.page.on("response", self._schedule_response_capture)
+
+    def set_phase(self, phase: str) -> None:
+        self.phase = phase
 
     def _schedule_response_capture(self, response: Response) -> None:
         if not is_interesting_url(response.url):
@@ -363,9 +483,12 @@ class PurchaseFlowRecorder:
 
         event = CaptureEvent(
             timestamp=datetime.now().isoformat(),
+            phase=self.phase,
             method=request.method,
             url=response.url,
             status=response.status,
+            page_url=self.page.page.url if self.page is not None else None,
+            resource_type=getattr(request, "resource_type", None),
             request_headers=request_headers,
             response_headers=response_headers,
             request_body=request.post_data,
@@ -434,6 +557,14 @@ async def click_first_actionable_package_button(page: BigModelPage) -> bool:
     return True
 
 
+async def get_first_actionable_package_button(page: BigModelPage):
+    package_buttons = await page._find_elements(page.PACKAGE_BUTTON_SELECTORS)
+    actionable_buttons = await page._filter_purchase_buttons(package_buttons)
+    if not actionable_buttons:
+        return None
+    return actionable_buttons[0]
+
+
 async def run_capture_session(
     *,
     account_id: int,
@@ -465,6 +596,7 @@ async def run_capture_session(
         page = await create_bigmodel_page(context)
         recorder = PurchaseFlowRecorder(output_dir)
         recorder.attach(page)
+        recorder.set_phase("landing")
 
         await page.go_to_home()
         await asyncio.sleep(1)
@@ -486,6 +618,7 @@ async def run_capture_session(
         )
 
         if click_hero:
+            recorder.set_phase("hero_click")
             hero = page.page.locator(
                 "button:has-text('即刻订阅'), [role='button']:has-text('即刻订阅')"
             ).first
@@ -520,6 +653,8 @@ async def watch_capture_session(
     watch_seconds: int,
     stop_on_actionable: bool,
     click_package_on_actionable: bool,
+    attempt_purchase_on_actionable: bool,
+    purchase_timeout_ms: int,
     settle_seconds: int,
 ) -> WatchSummary:
     account, cookies = load_account_with_cookies(account_id)
@@ -538,9 +673,11 @@ async def watch_capture_session(
         actionable_detected=False,
         package_click_attempted=click_package_on_actionable,
         package_click_triggered=False,
+        purchase_attempt_triggered=False,
         first_actionable_at=None,
         event_count=0,
         final_stock_status=None,
+        purchase_result=None,
     )
 
     try:
@@ -548,6 +685,7 @@ async def watch_capture_session(
         page = await create_bigmodel_page(context)
         recorder = PurchaseFlowRecorder(output_dir)
         recorder.attach(page)
+        recorder.set_phase("landing")
 
         await page.go_to_home()
         await asyncio.sleep(1)
@@ -558,6 +696,7 @@ async def watch_capture_session(
         await page.page.goto(target_url, wait_until="networkidle", timeout=120000)
 
         if click_hero:
+            recorder.set_phase("hero_click")
             hero = page.page.locator(
                 "button:has-text('即刻订阅'), [role='button']:has-text('即刻订阅')"
             ).first
@@ -591,7 +730,20 @@ async def watch_capture_session(
                 summary.actionable_detected = True
                 if summary.first_actionable_at is None:
                     summary.first_actionable_at = sample.checked_at
+                if attempt_purchase_on_actionable and not summary.purchase_attempt_triggered:
+                    recorder.set_phase("purchase_attempt")
+                    summary.purchase_attempt_triggered = True
+                    initial_button = await get_first_actionable_package_button(page)
+                    summary.purchase_result = await page.purchase_detailed(
+                        timeout=purchase_timeout_ms,
+                        refresh_interval=max(float(refresh_interval), 0.1),
+                        initial_buy_button=initial_button,
+                    )
+                    if settle_seconds > 0:
+                        await asyncio.sleep(settle_seconds)
+                    break
                 if click_package_on_actionable and not summary.package_click_triggered:
+                    recorder.set_phase("package_click")
                     summary.package_click_triggered = await click_first_actionable_package_button(page)
                     if settle_seconds > 0:
                         await asyncio.sleep(settle_seconds)
@@ -601,6 +753,7 @@ async def watch_capture_session(
             if deadline is not None and asyncio.get_running_loop().time() >= deadline:
                 break
 
+            recorder.set_phase("watch_reload")
             await page.page.reload(wait_until="networkidle", timeout=120000)
             await asyncio.sleep(refresh_interval)
 

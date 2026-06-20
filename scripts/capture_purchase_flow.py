@@ -23,8 +23,8 @@ sys.path.insert(0, str(root))
 from app.services.purchase_capture import (  # noqa: E402
     ensure_output_dir,
     run_capture_session,
-    watch_capture_session,
     wait_for_stock,
+    watch_capture_session,
 )
 
 
@@ -102,6 +102,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="When watch mode detects an actionable package button, click only that first-step button and then continue according to --stop-on-actionable",
     )
+    parser.add_argument(
+        "--attempt-purchase-on-actionable",
+        action="store_true",
+        help="When watch mode detects an actionable package button, run one controlled purchase attempt and stop at the order or payment page without final payment",
+    )
+    parser.add_argument(
+        "--purchase-timeout-ms",
+        type=int,
+        default=20000,
+        help="Timeout for the controlled purchase attempt triggered by --attempt-purchase-on-actionable",
+    )
     return parser.parse_args()
 
 
@@ -140,6 +151,8 @@ async def main() -> int:
             watch_seconds=args.watch_seconds,
             stop_on_actionable=args.stop_on_actionable,
             click_package_on_actionable=args.click_package_on_actionable,
+            attempt_purchase_on_actionable=args.attempt_purchase_on_actionable,
+            purchase_timeout_ms=args.purchase_timeout_ms,
             settle_seconds=args.settle_seconds,
         )
         print("\nWatch capture complete")
@@ -149,6 +162,13 @@ async def main() -> int:
         print(f"Actionable package detected: {summary.actionable_detected}")
         if summary.first_actionable_at:
             print(f"First actionable detected at: {summary.first_actionable_at}")
+        if summary.purchase_attempt_triggered and summary.purchase_result:
+            print(
+                "Purchase attempt result: "
+                f"success={summary.purchase_result.get('success')} "
+                f"reason={summary.purchase_result.get('reason')} "
+                f"attempts={summary.purchase_result.get('attempts')}"
+            )
         print(f"Watch summary: {output_dir / 'watch_summary.json'}")
         print(f"Samples: {output_dir / 'status_samples.jsonl'}")
     else:
@@ -170,6 +190,7 @@ async def main() -> int:
         print(f"Summary: {output_dir / 'summary.json'}")
     print(f"Events: {output_dir / 'events.jsonl'}")
     print(f"Endpoint summary: {output_dir / 'endpoint_summary.json'}")
+    print(f"Purchase candidates: {output_dir / 'purchase_candidates.json'}")
     print(f"Replay templates: {output_dir / 'replay_templates.json'}")
     print(f"Batch preview products: {output_dir / 'batch_preview_products.json'}")
     return 0

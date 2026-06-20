@@ -2,10 +2,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+
 from app.services.purchase_capture import (
     ButtonSnapshot,
     CaptureEvent,
     build_endpoint_summary,
+    build_purchase_candidate_summaries,
     build_replay_template,
     ensure_output_dir,
     extract_product_snapshot,
@@ -84,9 +86,12 @@ def test_extract_product_snapshot_reads_batch_preview_products():
 def test_build_replay_template_uses_placeholders_for_sensitive_headers():
     event = CaptureEvent(
         timestamp="2026-05-11T00:00:00",
+        phase="hero_click",
         method="POST",
         url="https://bigmodel.cn/api/biz/pay/batch-preview",
         status=200,
+        page_url="https://bigmodel.cn/glm-coding",
+        resource_type="xhr",
         request_headers={
             "authorization": "<redacted>",
             "bigmodel-organization": "org-1",
@@ -106,6 +111,8 @@ def test_build_replay_template_uses_placeholders_for_sensitive_headers():
         "<paste bigmodel-organization header from browser>"
     )
     assert template["headers"]["bigmodel-project"] == "<paste bigmodel-project header from browser>"
+    assert template["phase"] == "hero_click"
+    assert template["page_url"] == "https://bigmodel.cn/glm-coding"
     assert ":authority" not in template["headers"]
     assert template["body"] == {"invitationCode": ""}
 
@@ -113,9 +120,12 @@ def test_build_replay_template_uses_placeholders_for_sensitive_headers():
 def test_build_endpoint_summary_extracts_response_shape():
     event = CaptureEvent(
         timestamp="2026-05-11T00:00:00",
+        phase="purchase_attempt",
         method="POST",
         url="https://bigmodel.cn/api/biz/pay/batch-preview",
         status=200,
+        page_url="https://bigmodel.cn/glm-coding",
+        resource_type="xhr",
         request_headers={"content-type": "application/json"},
         response_headers={"content-type": "application/json"},
         request_body='{"invitationCode":""}',
@@ -124,10 +134,51 @@ def test_build_endpoint_summary_extracts_response_shape():
 
     summary = build_endpoint_summary(event)
 
+    assert summary.phase == "purchase_attempt"
+    assert summary.page_url == "https://bigmodel.cn/glm-coding"
+    assert summary.resource_type == "xhr"
     assert summary.response_code == 200
     assert summary.response_success is True
     assert summary.response_message == "ok"
     assert summary.response_data_keys == ["bizId", "productList"]
+
+
+def test_build_purchase_candidate_summaries_groups_by_endpoint_and_phase():
+    preview_event = CaptureEvent(
+        timestamp="2026-05-11T00:00:00",
+        phase="hero_click",
+        method="POST",
+        url="https://bigmodel.cn/api/biz/pay/batch-preview",
+        status=200,
+        page_url="https://bigmodel.cn/glm-coding",
+        resource_type="xhr",
+        request_headers={"content-type": "application/json"},
+        response_headers={"content-type": "application/json"},
+        request_body='{"invitationCode":""}',
+        response_body='{"code":200,"msg":"ok","success":true,"data":{"productList":[]}}',
+    )
+    order_event = CaptureEvent(
+        timestamp="2026-05-11T00:00:01",
+        phase="purchase_attempt",
+        method="POST",
+        url="https://bigmodel.cn/pay/bank/createBankOrder",
+        status=200,
+        page_url="https://bigmodel.cn/subscribe-pay",
+        resource_type="xhr",
+        request_headers={"content-type": "application/json"},
+        response_headers={"content-type": "application/json"},
+        request_body='{"productId":"product-1"}',
+        response_body='{"code":200,"msg":"ok","success":true,"data":{"orderId":"order-1","payUrl":"https://pay.example.com"}}',
+    )
+
+    candidates = build_purchase_candidate_summaries([preview_event, order_event])
+
+    assert [item["category"] for item in candidates] == ["order_creation", "preview"]
+    assert candidates[0]["phases"] == ["purchase_attempt"]
+    assert candidates[0]["page_urls"] == ["https://bigmodel.cn/subscribe-pay"]
+    assert candidates[0]["response_data_keys"] == ["orderId", "payUrl"]
+    assert candidates[1]["phases"] == ["hero_click"]
+    assert candidates[1]["request_body"] == {"invitationCode": ""}
 
 
 def test_summarize_button_states_counts_only_enabled_visible_buttons():
