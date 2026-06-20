@@ -1,14 +1,16 @@
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
+import app.services.purchase_capture as purchase_capture
 from app.services.purchase_capture import (
     ButtonSnapshot,
     CaptureEvent,
     build_endpoint_summary,
     build_purchase_candidate_summaries,
     build_replay_template,
+    capture_same_origin_probe_results,
     ensure_output_dir,
     extract_product_snapshot,
     get_purchase_api_catalog,
@@ -243,6 +245,46 @@ async def test_probe_endpoint_via_page_runs_same_origin_fetch_with_live_headers(
     assert result.response_body["data"]["id"] == "cust-1"
     assert result.request_headers["Authorization"] == "<redacted>"
     mock_page.page.evaluate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_capture_same_origin_probe_results_flushes_under_probe_phase(monkeypatch):
+    page = Mock()
+    recorder = Mock()
+    recorder.phase = "watch_reload"
+    recorder.flush = AsyncMock()
+
+    def set_phase(phase: str) -> None:
+        recorder.phase = phase
+
+    recorder.set_phase = Mock(side_effect=set_phase)
+
+    async def fake_run_same_origin_probes(page_arg, recorder_arg, *, endpoint_ids=None):
+        assert page_arg is page
+        assert recorder_arg is recorder
+        assert endpoint_ids == ["batch-preview"]
+        assert recorder.phase == "same_origin_probe"
+        return ["probe-result"]
+
+    monkeypatch.setattr(
+        purchase_capture,
+        "run_same_origin_probes",
+        fake_run_same_origin_probes,
+    )
+
+    results = await capture_same_origin_probe_results(
+        page,
+        recorder,
+        endpoint_ids=["batch-preview"],
+    )
+
+    assert results == ["probe-result"]
+    recorder.flush.assert_awaited_once()
+    assert recorder.phase == "watch_reload"
+    assert recorder.set_phase.call_args_list == [
+        call("same_origin_probe"),
+        call("watch_reload"),
+    ]
 
 
 def test_summarize_button_states_counts_only_enabled_visible_buttons():

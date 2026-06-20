@@ -643,6 +643,26 @@ async def run_same_origin_probes(
     return results
 
 
+async def capture_same_origin_probe_results(
+    page: BigModelPage,
+    recorder: "PurchaseFlowRecorder",
+    *,
+    endpoint_ids: Optional[list[str]] = None,
+) -> list[SameOriginProbeResult]:
+    previous_phase = recorder.phase
+    recorder.set_phase("same_origin_probe")
+    try:
+        return await run_same_origin_probes(
+            page,
+            recorder,
+            endpoint_ids=endpoint_ids,
+        )
+    finally:
+        await asyncio.sleep(0)
+        await recorder.flush()
+        recorder.set_phase(previous_phase)
+
+
 def write_capture_artifacts(
     output_dir: Path,
     events: list[CaptureEvent],
@@ -946,7 +966,7 @@ async def run_capture_session(
 
         await recorder.flush()
         if same_origin_probe:
-            same_origin_probe_results = await run_same_origin_probes(
+            same_origin_probe_results = await capture_same_origin_probe_results(
                 page,
                 recorder,
                 endpoint_ids=probe_endpoint_ids,
@@ -1086,7 +1106,7 @@ async def watch_capture_session(
 
         await recorder.flush()
         if same_origin_probe:
-            same_origin_probe_results = await run_same_origin_probes(
+            same_origin_probe_results = await capture_same_origin_probe_results(
                 page,
                 recorder,
                 endpoint_ids=probe_endpoint_ids,
