@@ -1,16 +1,22 @@
+# 优先使用项目虚拟环境，其次回退到系统 Python。
 VENV_PYTHON := .venv/bin/python
 PYTHON ?= $(shell if [ -x $(VENV_PYTHON) ]; then echo $(VENV_PYTHON); else command -v python3 2>/dev/null || command -v python 2>/dev/null; fi)
 
+# 通用运行参数。
 APP_DEBUG ?= false
 ACCOUNT_ID ?= 1
 TARGET_URL ?= https://bigmodel.cn/glm-coding
 OUTPUT_DIR ?= data/captures
+
+# auto-buy 盯盘模式参数。
 WATCH_SECONDS ?= 1800
 REFRESH_INTERVAL ?= 2
 SETTLE_SECONDS ?= 5
 PURCHASE_TIMEOUT_MS ?= 20000
 POLL_INTERVAL ?= 30
 WAIT_TIMEOUT_SECONDS ?= 0
+
+# prewarm-buy 定时预热模式参数。
 TARGET_TIME ?= 10:00
 TIMEZONE ?= Asia/Hong_Kong
 PREWARM_SECONDS ?= 600
@@ -18,12 +24,17 @@ RUN_SECONDS ?= 1200
 WAIT_LOGIN_SECONDS ?= 0
 KEEP_OPEN_SECONDS ?= 0
 SCREENSHOT_PATH ?= data/screenshots/payment_page.png
+
+# 0 表示关闭，非 0 表示开启。
 HEADED ?= 1
 WAIT_FOR_STOCK ?= 0
 SAME_ORIGIN_PROBE ?= 0
+
+# 可选附加参数。
 PROBE_ENDPOINTS ?=
 EXTRA_ARGS ?=
 
+# 由布尔变量展开出来的 CLI flags。
 HEADED_FLAG :=
 WAIT_FOR_STOCK_FLAGS :=
 SAME_ORIGIN_PROBE_FLAGS :=
@@ -63,6 +74,7 @@ help: ## Show available Make targets and overridable variables.
 verify-purchase: ## Run the local purchase setup verification script.
 	DEBUG=$(APP_DEBUG) $(PYTHON) scripts/verify_purchase_setup.py
 
+# 自动盯盘，出现可点击套餐按钮后触发一次受控购买尝试。
 auto-buy: ## Watch stock and start one controlled purchase attempt when a package button becomes actionable.
 	DEBUG=$(APP_DEBUG) $(PYTHON) scripts/capture_purchase_flow.py \
 		--account-id $(ACCOUNT_ID) \
@@ -79,6 +91,7 @@ auto-buy: ## Watch stock and start one controlled purchase attempt when a packag
 		$(SAME_ORIGIN_PROBE_FLAGS) \
 		$(EXTRA_ARGS)
 
+# 提前预热登录态，到目标时间后执行真实购买流程。
 prewarm-buy: ## Prewarm before TARGET_TIME and arm a real purchase attempt after the target window starts.
 	DEBUG=$(APP_DEBUG) $(PYTHON) scripts/prewarm_purchase.py \
 		--account-id $(ACCOUNT_ID) \
